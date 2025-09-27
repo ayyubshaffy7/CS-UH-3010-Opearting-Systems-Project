@@ -7,8 +7,20 @@ typedef struct {
     char *err_file;  // for 2>
 } Redirs;
 
+typedef struct {
+    char **argv;  // compacted argv for execvp
+    Redirs r;     // redirections for this stage
+} Stage;
+
 char** parse_command(char* input);  // function to parse a command string into an array of arguments
 int parse_redirs(char **args, Redirs *R, char **errmsg);  // scan args to extract redirections and compact argv
 
+// build pipeline stages from a flat token list (args with NULL terminator).
+// returns number of stages on success (>=1), or -1 on error and sets *errmsg.
+int build_pipeline(char **tokens, Stage **stages_out, int *nstages_out, const char **errmsg);
+
+// execute an already-built pipeline (with redirs embedded in each stage).
+// returns 0 on success; -1 on immediate setup failure.
+int exec_pipeline(Stage *stages, int nstages);
 
 #endif //UTILS_H
