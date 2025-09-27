@@ -19,4 +19,4 @@ $(TARGET): $(SOURCES)
 
 # Rule to clean up the directory (remove executable)
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) test1.txt test2.txt

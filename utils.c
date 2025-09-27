@@ -49,3 +49,38 @@ char** parse_command(char* input) {
     tokens[position] = NULL;
     return tokens;
 }
+
+int parse_redirs(char **args, Redirs *R, char **errmsg) {
+    R->in_file = R->out_file = R->err_file = NULL;
+
+    int write_idx = 0;
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "<") == 0) {
+            if (R->in_file) { *errmsg = "Duplicate input redirection."; return -1; }
+            if (!args[i+1]) { *errmsg = "Input file not specified."; return -1; }
+            R->in_file = args[i+1];
+            i++; // skip filename
+            continue;
+        }
+        if (strcmp(args[i], ">") == 0) {
+            if (R->out_file) { *errmsg = "Duplicate output redirection."; return -1; }
+            if (!args[i+1]) { *errmsg = "Output file not specified."; return -1; }
+            R->out_file = args[i+1];
+            i++;
+            continue;
+        }
+        if (strcmp(args[i], "2>") == 0) {
+            if (R->err_file) { *errmsg = "Duplicate error redirection."; return -1; }
+            if (!args[i+1]) { *errmsg = "Error output file not specified."; return -1; }
+            R->err_file = args[i+1];
+            i++;
+            continue;
+        }
+        // keep normal argv tokens
+        args[write_idx++] = args[i];
+    }
+    args[write_idx] = NULL;
+
+    if (!args[0]) { *errmsg = "Command missing."; return -1; }
+    return 0;
+}
