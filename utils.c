@@ -63,21 +63,21 @@ int parse_redirs(char **args, Redirs *R, char **errmsg) {
     for (int i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], "<") == 0) {
             if (R->in_file) { *errmsg = "Duplicate input redirection."; return -1; }
-            if (!args[i+1]) { *errmsg = "Input file not specified."; return -1; }
+            if (!args[i+1]) { *errmsg = "bash: syntax error near unexpected token `newline'"; return -1; } // Input file not specified
             R->in_file = args[i+1];
             i++; // skip filename
             continue;
         }
         if (strcmp(args[i], ">") == 0) {
             if (R->out_file) { *errmsg = "Duplicate output redirection."; return -1; }
-            if (!args[i+1]) { *errmsg = "Output file not specified."; return -1; }
+            if (!args[i+1]) { *errmsg = "bash: syntax error near unexpected token `newline'"; return -1; } // Output file not specified.
             R->out_file = args[i+1];
             i++;
             continue;
         }
         if (strcmp(args[i], "2>") == 0) {
             if (R->err_file) { *errmsg = "Duplicate error redirection."; return -1; }
-            if (!args[i+1]) { *errmsg = "Error output file not specified."; return -1; }
+            if (!args[i+1]) { *errmsg = "bash: syntax error near unexpected token `newline'"; return -1; } // Error output file not specified
             R->err_file = args[i+1];
             i++;
             continue;
@@ -116,7 +116,7 @@ int build_pipeline(char **tokens, Stage **stages_out, int *nstages_out, const ch
         if (strcmp(tokens[i], "|") == 0) {
             if (i == 0) { *errmsg = "Command missing after pipe."; return -1; }  // leading '|'
             if (i == ntok - 1) { *errmsg = "Command missing after pipe."; return -1; }  // trailing '|'
-            if (i+1 < ntok && strcmp(tokens[i+1], "|") == 0) { *errmsg = "Empty command between pipes."; return -1; }
+            if (i+1 < ntok && strcmp(tokens[i+1], "|") == 0) { *errmsg = "bash: syntax error near unexpected token `|'"; return -1; }
             stages++;
         }
     }
@@ -139,7 +139,7 @@ int build_pipeline(char **tokens, Stage **stages_out, int *nstages_out, const ch
             // Parse redirections and compact argv in-place for this stage
             char *perr = NULL;
             if (parse_redirs(&tokens[start], &S[sidx].r, &perr) < 0) {
-                *errmsg = perr; // e.g., "Input file not specified.", etc.
+                *errmsg = perr; // e.g., "bash: syntax error near unexpected token `newline'", etc.
                 // restore and cleanup
                 if (saved) tokens[i] = saved;
                 free(S);
@@ -193,9 +193,16 @@ int exec_pipeline(Stage *S, int n) {
                 if (dup2(fd, STDERR_FILENO) < 0) { perror("dup2 2>"); _exit(1); }
                 close(fd);
             }
-            execvp(S[0].argv[0], S[0].argv);
-            perror(S[0].argv[0]);
-            _exit(127);
+            if (execvp(S[0].argv[0], S[0].argv) == -1) {
+                if (errno == ENOENT) {
+                    fprintf(stderr, "%s: command not found\n", S[0].argv[0]);
+                }
+                else {
+                    // For all other errors, print the default system error
+                    fprintf(stderr, "%s: %s\n", S[0].argv[0], strerror(errno));
+                }
+                exit(EXIT_FAILURE);
+            }
         }
         // Spec says you must wait for the last process to finish before prompting again.
         // We wait() for the only child (and you *should* reap to avoid zombies). :contentReference[oaicite:5]{index=5}
@@ -265,9 +272,18 @@ int exec_pipeline(Stage *S, int n) {
             }
 
             // 4) Exec the stage
-            execvp(S[i].argv[0], S[i].argv);
-            perror(S[i].argv[0]);
-            _exit(127);
+            // execvp(S[i].argv[0], S[i].argv);
+            // perror(S[i].argv[0]);
+            if (execvp(S[0].argv[0], S[0].argv) == -1) {
+                if (errno == ENOENT) {
+                    fprintf(stderr, "%s: command not found\n", S[0].argv[0]);
+                }
+                else {
+                    // For all other errors, print the default system error
+                    fprintf(stderr, "%s: %s\n", S[0].argv[0], strerror(errno));
+                }
+                exit(EXIT_FAILURE);
+            }
         }
         // ---- parent continues ----
     }
