@@ -13,36 +13,28 @@ int main() {
     size_t len = 0;
     ssize_t read;
 
-    // The main shell loop
+    // main shell loop
     while (true) {
-        // 1. Display prompt
         printf("$ ");
-
-        // 2. Read a line of input
         read = getline(&line, &len, stdin);
         if (read == -1) {
-            break; // Exit on EOF (Ctrl+D)
+            break; // exit on EOF (ctrl+D)
         }
 
-        // If user just hits enter, continue to next loop iteration
-        if (strcmp(line, "\n") == 0) {
-            continue;
-        }
-
-        // 3. Parse the input into an array of arguments
+        // parse input into an array of arguments
         char** args = parse_command(line);
-        if (args[0] != NULL && strcmp(args[0], "exit") == 0) {
+        if (args[0] == NULL) { continue; } // if user just hits enter, types a space or a tab, then just continue to next loop iteration
+        if (strcmp(args[0], "exit") == 0) {
             break;
         }
 
         const char *errmsg = NULL;
         Stage *stages = NULL;
         int nstages = 0;
-
         if (build_pipeline(args, &stages, &nstages, &errmsg) < 0) {
             fprintf(stderr, "%s\n", errmsg);
             free(args);
-            continue; // prompt again
+            continue;  // prompt again
         }
 
         if (exec_pipeline(stages, nstages) < 0) {
@@ -51,7 +43,7 @@ int main() {
         free(stages);
     }
 
-    // Final cleanup
+    // final cleanup
     free(line);
     return 0;
 }
