@@ -274,13 +274,13 @@ int exec_pipeline(Stage *S, int n) {
             // 4) Exec the stage
             // execvp(S[i].argv[0], S[i].argv);
             // perror(S[i].argv[0]);
-            if (execvp(S[0].argv[0], S[0].argv) == -1) {
+            if (execvp(S[i].argv[0], S[i].argv) == -1) {
                 if (errno == ENOENT) {
-                    fprintf(stderr, "%s: command not found\n", S[0].argv[0]);
+                    fprintf(stderr, "%s: command not found\n", S[i].argv[0]);
                 }
                 else {
                     // For all other errors, print the default system error
-                    fprintf(stderr, "%s: %s\n", S[0].argv[0], strerror(errno));
+                    fprintf(stderr, "%s: %s\n", S[i].argv[0], strerror(errno));
                 }
                 exit(EXIT_FAILURE);
             }
