@@ -1,7 +1,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
-// A Redirs hold file redirections for a single stage
+// a Redirs hold file redirections for a single stage
 typedef struct {
     char *in_file;   // for <
     char *out_file;  // for >

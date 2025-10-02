@@ -136,9 +136,7 @@ int build_pipeline(char **tokens, Stage **stages_out, int *nstages_out, const ch
     for (int i = 0; i <= ntok; i++) {
         if (i == ntok || strcmp(tokens[i], "|") == 0) {
             // temporarily NULL-terminate this stage
-            char *saved = NULL;
             if (i < ntok) {
-                saved = tokens[i]; 
                 tokens[i] = NULL;
             }
 
@@ -147,7 +145,6 @@ int build_pipeline(char **tokens, Stage **stages_out, int *nstages_out, const ch
             if (parse_redirs(&tokens[start], &S[sidx].r, &perr) < 0) {
                 *errmsg = perr; // e.g., "bash: syntax error near unexpected token `newline'", etc.
                 // restore and cleanup
-                if (saved) tokens[i] = saved;
                 free(S);
                 return -1;
             }
@@ -157,13 +154,12 @@ int build_pipeline(char **tokens, Stage **stages_out, int *nstages_out, const ch
             S[sidx].argv = &tokens[start];
             if (!S[sidx].argv[0]) {
                 *errmsg = "Command missing in pipe sequence.";
-                if (saved) tokens[i] = saved;
                 free(S);
                 return -1;
             }
 
             // restore token for next scan
-            if (saved) tokens[i] = saved;
+            // if (saved) tokens[i] = saved;
             start = i + 1;
             sidx++;
         }
@@ -207,7 +203,7 @@ int exec_pipeline(Stage *S, int n) {
             }
             if (execvp(S[0].argv[0], S[0].argv) == -1) {
                 if (errno == ENOENT) {
-                    if (S[0].argv[0][0] == '.' && S[0].argv[0][1] == '/') {             // in order to immitate bash behavior, we check if 
+                    if (S[0].argv[0][0] == '.' && S[0].argv[0][1] == '/') {               // in order to immitate bash behavior, we check if 
                         fprintf(stderr, "%s: No such file or directory\n", S[0].argv[0]); // the executable exists, so we can give identical err msg
                     }
                     else {
