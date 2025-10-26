@@ -11,25 +11,33 @@
 
 #define TOKEN_DELIMITERS " \n" // space and newline are the only delimiters
 
+// struct to hold a token along with whether globbing is allowed
+// globbing is expanding wildcard patterns (*, ?, [ ]) into matching filenames.
 typedef struct {
-    char *s;         // token string (no quotes)
-    int allow_glob;  // 1 if token had no quotes -> glob is allowed; 0 otherwise
+    char *s;         
+    int allow_glob;  
 } Tok;
 
+// push a token into the dynamic array
 static void push_tok(Tok **arr, int *n, int *cap, char *buf, int quoted_any) {
-    if (!buf || !*buf) return; // empty => nothing to push
+    if (!buf || !*buf) return; // empty 
     if (*n >= *cap) { *cap = (*cap? *cap*2 : 8); *arr = realloc(*arr, (*cap)*sizeof(**arr)); }
     (*arr)[*n].s = buf;
-    (*arr)[*n].allow_glob = !quoted_any; // quoted tokens should not be glob-expanded
+    (*arr)[*n].allow_glob = !quoted_any; // quoted tokens aren't glob-expanded
     (*n)++;
 }
 
+// check if a string has any glob characters
 static int has_glob_chars(const char *s){
     for (; *s; s++) if (*s=='*' || *s=='?' || *s=='[') return 1;
     return 0;
 }
 
-
+/*
+    * Parses a command string into an array of arguments, handling quotes, escapes, and globbing.
+    * input is the command string
+    * function returns a NULL-terminated array of argument strings
+*/
 char **parse_command(const char *input) {
     Tok *toks = NULL; int nt=0, cap=0;
 
@@ -53,45 +61,47 @@ char **parse_command(const char *input) {
             continue;
         }
 
-        if (!in_d && c=='\'') { // toggle single quotes; everything literal inside
+        if (!in_d && c=='\'') { // toggle single quotes - everything literal inside
             in_s = !in_s; quoted_any = 1; p++;
             continue;
         }
-        if (!in_s && c=='"') {  // toggle double quotes; backslash can escape quotes
+        if (!in_s && c=='"') {  // toggle double quotes - backslash can escape quotes
             in_d = !in_d; quoted_any = 1; p++;
             continue;
         }
-        // Outside single quotes; handle backslash carefully
+
+        // outside single quotes. handle backslash carefully
         if (!in_s && c == '\\') {
             char next = p[1];
 
-            if (!next) {                // trailing backslash → keep it
+            if (!next) {                // trailing backslash so keep it
                 BUF_PUSH('\\');
                 p++;
                 continue;
             }
 
             if (!in_d) {
-                // Outside quotes: only use backslash to escape metachars/whitespace
+                // outside quotes - only use backslash to escape metachars/whitespace
                 if (isspace((unsigned char)next) ||
                     next=='\'' || next=='"' || next=='\\' ||
                     next=='|'  || next=='<' || next=='>') {
-                    BUF_PUSH(next);     // consume the backslash; emit the escaped char
+                    BUF_PUSH(next);     // consume the backslash - emit the escaped char
                     p += 2;
                     continue;
                 }
-                // Otherwise, keep the backslash so things like \n reach the program
+                // otherwise, keep the backslash 
                 BUF_PUSH('\\');
                 p++;
                 continue;
             } else {
-                // Inside double quotes: only \" and \\ are special; leave \n, \t, etc. intact
+                // inside double quotes - only \" and \\ are special
+                // leave \n, \t, etc. intact
                 if (next=='"' || next=='\\') {
                     BUF_PUSH(next);
                     p += 2;
                     continue;
                 }
-                BUF_PUSH('\\');         // preserve backslash (so echo -e sees \n)
+                BUF_PUSH('\\');         // preserve backslash, so echo -e sees \n
                 p++;
                 continue;
             }
@@ -102,15 +112,13 @@ char **parse_command(const char *input) {
         p++;
     }
     if (in_s || in_d) {
-        // unbalanced quotes -> simplest behavior: treat quotes as closed at EOL.
-        // If your spec requires an error, detect and report earlier instead.
+        // unbalanced quotes simplest behavior - treat quotes as closed at EOL.
     }
     if (blen) { BUF_PUSH('\0'); push_tok(&toks,&nt,&cap,buf,quoted_any); } // flush last
     #undef BUF_PUSH
 
-    // --- Optional glob expansion like a real shell (basic) ---
-    // We expand only tokens that were NOT quoted and that include glob chars.
-    // Use GLOB_NOCHECK to keep the original if no match (bash default behavior).
+    // expanding only tokens that were not quoted and that include glob chars.
+    // Use GLOB_NOCHECK to keep the original if no match
     char **argv = NULL; int argc = 0, avcap = 0;
     #define ARGV_PUSH(str) do { \
         if (argc+1 >= avcap) { avcap = avcap? avcap*2 : 8; argv = realloc(argv, avcap*sizeof(char*)); } \
