@@ -181,8 +181,21 @@ int build_pipeline(char **tokens, Stage **stages_out, int *nstages_out, const ch
         if (strcmp(tokens[i], "|") == 0) {
             if (i == 0) { *errmsg = "Command missing after pipe."; return -1; }  // leading '|'
             if (i == ntok - 1) { *errmsg = "Command missing after pipe."; return -1; }  // trailing '|'
+
             if (i+1 < ntok && strcmp(tokens[i+1], "|") == 0) { *errmsg = "bash: syntax error near unexpected token `|'"; return -1; } // double or more '|'
             stages++;
+        }
+
+        // NEW: catch tokens that are "||", "|||", etc.
+        if (strchr(tokens[i], '|')) {
+            int count = 0;
+            for (char *p = tokens[i]; *p; p++) {
+                if (*p == '|') count++;
+            }
+            if (count > 1) {
+                *errmsg = "bash: syntax error near unexpected token `|'";
+                return -1;
+            }
         }
     }
 
