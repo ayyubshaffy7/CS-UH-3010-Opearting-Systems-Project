@@ -6,46 +6,106 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <glob.h>
+#include <ctype.h>
 
 #define TOKEN_DELIMITERS " \n" // space and newline are the only delimiters
 
-/*
- * Parses the input line into a NULL-terminated array of tokens (arguments)
- * input is the raw command line string from the user
- * function returns a dynamically allocated array of strings
-*/
-char** parse_command(char* input) {
+typedef struct {
+    char *s;          // token string (no quotes)
+    int allow_glob;   // 1 if token had no quotes -> glob is allowed; 0 otherwise
+} Tok;
 
-    int bufsize = 64; // initial array size for the list of arguments
-    int position = 0;
-    char** tokens = malloc(bufsize * sizeof(char*));
-    char* token;
-    if (!tokens) {
-        fprintf(stderr, "myshell: allocation error\n");
-        exit(EXIT_FAILURE);
-    }
+static void push_tok(Tok **arr, int *n, int *cap, char *buf, int quoted_any) {
+    if (!buf || !*buf) return; // empty => nothing to push
+    if (*n >= *cap) { *cap = (*cap? *cap*2 : 8); *arr = realloc(*arr, (*cap)*sizeof(**arr)); }
+    (*arr)[*n].s = buf;
+    (*arr)[*n].allow_glob = !quoted_any; // quoted tokens should not be glob-expanded
+    (*n)++;
+}
 
-    // use strtok to split the input string into tokens
-    token = strtok(input, TOKEN_DELIMITERS);
-    while (token != NULL) {
-        tokens[position] = token;
-        position++;
-        // if we've exceeded the buffer, reallocate more memory
-        if (position >= bufsize) {
-            bufsize += 64;
-            tokens = realloc(tokens, bufsize * sizeof(char*));
-            if (!tokens) {
-                fprintf(stderr, "myshell: allocation error\n");
-                exit(EXIT_FAILURE);
-            }
+static int has_glob_chars(const char *s){
+    for (; *s; s++) if (*s=='*' || *s=='?' || *s=='[') return 1;
+    return 0;
+}
+
+
+char **parse_command(const char *input) {
+    Tok *toks = NULL; int nt=0, cap=0;
+
+    int in_s = 0, in_d = 0;
+    int quoted_any = 0; // per-token: did we see any quotes?
+    char *buf = NULL; size_t blen = 0, bcap = 0;
+
+    #define BUF_PUSH(c) do { \
+        if (blen+1 >= bcap) { bcap = bcap? bcap*2 : 32; buf = realloc(buf, bcap); } \
+        buf[blen++] = (char)(c); \
+    } while(0)
+
+    const char *p = input;
+    while (*p) {
+        char c = *p;
+
+        if (!in_s && !in_d && isspace((unsigned char)c)) {
+            // end of token boundary
+            if (blen) { BUF_PUSH('\0'); push_tok(&toks,&nt,&cap,buf,quoted_any); buf=NULL; blen=0; bcap=0; quoted_any=0; }
+            p++;
+            continue;
         }
-        // get the next token
-        token = strtok(NULL, TOKEN_DELIMITERS);
-    }
 
-    // make sure the last element of the array is NULL for execvp
-    tokens[position] = NULL;
-    return tokens;
+        if (!in_d && c=='\'') { // toggle single quotes; everything literal inside
+            in_s = !in_s; quoted_any = 1; p++;
+            continue;
+        }
+        if (!in_s && c=='"') {  // toggle double quotes; backslash can escape quotes
+            in_d = !in_d; quoted_any = 1; p++;
+            continue;
+        }
+        if (!in_s && c=='\\') { // backslash escape (disabled inside single quotes)
+            if (p[1]) { BUF_PUSH(p[1]); p+=2; continue; }
+            // trailing backslash -> treat as literal
+            BUF_PUSH('\\'); p++; continue;
+        }
+
+        // normal char
+        BUF_PUSH(c);
+        p++;
+    }
+    if (in_s || in_d) {
+        // unbalanced quotes -> simplest behavior: treat quotes as closed at EOL.
+        // If your spec requires an error, detect and report earlier instead.
+    }
+    if (blen) { BUF_PUSH('\0'); push_tok(&toks,&nt,&cap,buf,quoted_any); } // flush last
+    #undef BUF_PUSH
+
+    // --- Optional glob expansion like a real shell (basic) ---
+    // We expand only tokens that were NOT quoted and that include glob chars.
+    // Use GLOB_NOCHECK to keep the original if no match (bash default behavior).
+    char **argv = NULL; int argc = 0, avcap = 0;
+    #define ARGV_PUSH(str) do { \
+        if (argc+1 >= avcap) { avcap = avcap? avcap*2 : 8; argv = realloc(argv, avcap*sizeof(char*)); } \
+        argv[argc++] = (str); \
+    } while(0)
+
+    for (int i=0;i<nt;i++){
+        if (toks[i].allow_glob && has_glob_chars(toks[i].s)) {
+            glob_t g; memset(&g,0,sizeof(g));
+            int rc = glob(toks[i].s, GLOB_NOCHECK, NULL, &g);
+            if (rc == 0 || rc == GLOB_NOMATCH) {
+                for (size_t j=0;j<g.gl_pathc;j++) {
+                    ARGV_PUSH(strdup(g.gl_pathv[j]));
+                }
+                globfree(&g);
+                free(toks[i].s);
+                continue;
+            }
+            globfree(&g); // fall through on error
+        }
+        ARGV_PUSH(toks[i].s); // no glob expansion
+    }
+    ARGV_PUSH(NULL);
+    free(toks);
+    return argv;
 }
 
 /*

@@ -14,7 +14,7 @@ typedef struct {
     Redirs r;     // redirections for this stage
 } Stage;
 
-char** parse_command(char* input);  // function to parse a command string into an array of arguments
+char** parse_command(const char* input);  // function to parse a command string into an array of arguments
 int parse_redirs(char **args, Redirs *R, char **errmsg);  // scan args to extract redirections and compact argv
 
 // build pipeline stages from a flat token list (args with NULL terminator)
