@@ -12,8 +12,8 @@
 #define TOKEN_DELIMITERS " \n" // space and newline are the only delimiters
 
 typedef struct {
-    char *s;          // token string (no quotes)
-    int allow_glob;   // 1 if token had no quotes -> glob is allowed; 0 otherwise
+    char *s;         // token string (no quotes)
+    int allow_glob;  // 1 if token had no quotes -> glob is allowed; 0 otherwise
 } Tok;
 
 static void push_tok(Tok **arr, int *n, int *cap, char *buf, int quoted_any) {
@@ -61,10 +61,40 @@ char **parse_command(const char *input) {
             in_d = !in_d; quoted_any = 1; p++;
             continue;
         }
-        if (!in_s && c=='\\') { // backslash escape (disabled inside single quotes)
-            if (p[1]) { BUF_PUSH(p[1]); p+=2; continue; }
-            // trailing backslash -> treat as literal
-            BUF_PUSH('\\'); p++; continue;
+        // Outside single quotes; handle backslash carefully
+        if (!in_s && c == '\\') {
+            char next = p[1];
+
+            if (!next) {                // trailing backslash → keep it
+                BUF_PUSH('\\');
+                p++;
+                continue;
+            }
+
+            if (!in_d) {
+                // Outside quotes: only use backslash to escape metachars/whitespace
+                if (isspace((unsigned char)next) ||
+                    next=='\'' || next=='"' || next=='\\' ||
+                    next=='|'  || next=='<' || next=='>') {
+                    BUF_PUSH(next);     // consume the backslash; emit the escaped char
+                    p += 2;
+                    continue;
+                }
+                // Otherwise, keep the backslash so things like \n reach the program
+                BUF_PUSH('\\');
+                p++;
+                continue;
+            } else {
+                // Inside double quotes: only \" and \\ are special; leave \n, \t, etc. intact
+                if (next=='"' || next=='\\') {
+                    BUF_PUSH(next);
+                    p += 2;
+                    continue;
+                }
+                BUF_PUSH('\\');         // preserve backslash (so echo -e sees \n)
+                p++;
+                continue;
+            }
         }
 
         // normal char
