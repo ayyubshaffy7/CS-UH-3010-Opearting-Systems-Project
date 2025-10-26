@@ -1,55 +1,97 @@
-// server.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <stdarg.h> 
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <arpa/inet.h>
 #include "net.h"
-#include "utils.h"      // your parse_command (quote-aware), etc.
+#include "utils.h"
 
-// Capture exec_pipeline's combined stdout/stderr into a dynamic buffer.
-// Strategy: fork a child that runs exec_pipeline with stdout/stderr duped to pipe[1].
-// Parent reads all bytes from pipe[0] into malloc'd buffer.
-static int run_command_capture(char **tokens, char **out_buf, size_t *out_len, const char **errmsg) {
+static void log_line(const char *tag, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    fprintf(stderr, "[%s] ", tag);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+}
+
+#define LOG_INFO(...) log_line("INFO", __VA_ARGS__)
+#define LOG_RX(...)   log_line("RECEIVED", __VA_ARGS__)
+#define LOG_EX(...)   log_line("EXECUTING", __VA_ARGS__)
+#define LOG_OUT(...)  log_line("OUTPUT", __VA_ARGS__)
+#define LOG_ERR(...)  log_line("ERROR", __VA_ARGS__)
+
+// show a printable preview of payload (newlines escaped) up to N chars
+static void preview_payload(const char *data, size_t len, size_t N, char *out, size_t outcap) {
+    size_t w = 0;
+    for (size_t i = 0; i < len && w + 4 < outcap && N > 0; i++, N--) {
+        unsigned char c = (unsigned char)data[i];
+        if (c == '\n') { out[w++]='\\'; out[w++]='n'; }
+        else if (c == '\r') { out[w++]='\\'; out[w++]='r'; }
+        else if (c == '\t') { out[w++]='\\'; out[w++]='t'; }
+        else if (c < 32 || c == 127) { w += snprintf(out+w, outcap-w, "\\x%02X", c); }
+        else out[w++] = (char)c;
+    }
+    out[w] = '\0';
+}
+
+// server.c
+// Capture combined stdout+stderr of a parsed command line.
+// On parse error (bad pipes/redirs), we return that error as text payload (newline-terminated)
+// so the client prints it like a real shell would.
+//
+// Returns 0 on success (payload captured and returned).
+// Returns -1 only on immediate setup failure (pipe/fork/malloc).
+//
+// Ownership:
+//   - *out_buf is malloc'd here; caller must free(*out_buf).
+//   - *errmsg is only used for internal branching; we materialize parse errors into out_buf.
+static int run_command_capture(char **tokens,
+                               char **out_buf, size_t *out_len,
+                               const char **errmsg)
+{
     *out_buf = NULL; *out_len = 0; *errmsg = NULL;
 
+    // Build pipeline
     Stage *stages = NULL;
     int nstages = 0;
     if (build_pipeline(tokens, &stages, &nstages, errmsg) < 0) {
-        // return the parse error as payload back to client
+        // Convert parse-time error into textual payload for the client.
         size_t l = strlen(*errmsg);
-        *out_buf = malloc(l + 2);
-        memcpy(*out_buf, *errmsg, l);
-        (*out_buf)[l] = '\n'; (*out_buf)[l+1] = '\0';
+        char *buf = malloc(l + 2);
+        if (!buf) return -1;
+        memcpy(buf, *errmsg, l);
+        buf[l] = '\n';
+        buf[l+1] = '\0';
+        *out_buf = buf;
         *out_len = l + 1;
-        *errmsg = NULL; // handled as textual error
+        *errmsg = NULL; // handled as payload
         return 0;
     }
 
+    // Pipe to capture child's stdout+stderr
     int pfd[2];
-    if (pipe(pfd) < 0) { *errmsg = "pipe failed"; free(stages); return -1; }
+    if (pipe(pfd) < 0) { free(stages); return -1; }
 
     pid_t pid = fork();
-    if (pid < 0) { *errmsg = "fork failed"; close(pfd[0]); close(pfd[1]); free(stages); return -1; }
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); free(stages); return -1; }
 
     if (pid == 0) {
-        // child: route stdout+stderr to pfd[1], then run pipeline
+        // Child: route both stdout and stderr into pfd[1], then run pipeline.
         close(pfd[0]);
-        if (dup2(pfd[1], STDOUT_FILENO) < 0) _exit(127);
-        if (dup2(pfd[1], STDERR_FILENO) < 0) _exit(127);
-        // Close inherited pipe ends not needed:
-        // (exec_pipeline will fork further and children inherit these std fds)
-        // run
+        if (dup2(pfd[1], STDOUT_FILENO) < 0) exit(127);
+        if (dup2(pfd[1], STDERR_FILENO) < 0) exit(127);
+        close(pfd[1]);
         exec_pipeline(stages, nstages);
-        _exit(0);
+        exit(0);
     }
 
-    // parent: read all
+    // Parent: read everything the child writes
     close(pfd[1]);
     size_t cap = 4096, len = 0;
     char *buf = malloc(cap);
@@ -58,10 +100,13 @@ static int run_command_capture(char **tokens, char **out_buf, size_t *out_len, c
     for (;;) {
         char tmp[4096];
         ssize_t r = read(pfd[0], tmp, sizeof tmp);
-        if (r < 0) { if (errno == EINTR) continue; break; }
-        if (r == 0) break;
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            free(buf); close(pfd[0]); free(stages); return -1;
+        }
+        if (r == 0) break; // EOF
         if (len + (size_t)r > cap) {
-            cap = (len + r) * 2;
+            cap = (len + (size_t)r) * 2;
             char *nb = realloc(buf, cap);
             if (!nb) { free(buf); close(pfd[0]); free(stages); return -1; }
             buf = nb;
@@ -73,7 +118,9 @@ static int run_command_capture(char **tokens, char **out_buf, size_t *out_len, c
 
     int status; waitpid(pid, &status, 0);
     free(stages);
-    *out_buf = buf; *out_len = len;
+
+    *out_buf = buf;
+    *out_len = len;
     return 0;
 }
 
@@ -100,49 +147,65 @@ static int send_frame(int fd, const char *buf, uint32_t len) {
 
 int main(int argc, char **argv) {
     if (argc != 2) { fprintf(stderr, "Usage: %s <port>\n", argv[0]); return 1; }
+
     uint16_t port = (uint16_t)atoi(argv[1]);
     int lfd = tcp_listen(port);
     if (lfd < 0) { perror("listen"); return 1; }
-    fprintf(stderr, "[server] listening on %u\n", port); // server-side trace per spec. :contentReference[oaicite:1]{index=1}
+    LOG_INFO("Server started, waiting for client connections on port %u...", port);
 
     for (;;) {
-        int cfd = accept(lfd, NULL, NULL);
+        struct sockaddr_in peer; socklen_t pl = sizeof peer;
+        int cfd = accept(lfd, (struct sockaddr*)&peer, &pl);
         if (cfd < 0) { if (errno == EINTR) continue; perror("accept"); break; }
-        fprintf(stderr, "[server] client connected\n");   // server trace
+
+        char ip[32]; inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip);
+        LOG_INFO("Client connected from %s:%u.", ip, ntohs(peer.sin_port));
 
         for (;;) {
             char *cmd = NULL; uint32_t clen = 0;
-            if (recv_frame(cfd, &cmd, &clen) < 0) { fprintf(stderr, "[server] recv error/closed\n"); break; }
-            if (clen == 0) { free(cmd); break; } // client closed session
-            // Trim trailing newlines (client sends line)
+            if (recv_frame(cfd, &cmd, &clen) < 0) { LOG_ERR("Receive error or closed by peer."); break; }
+            if (clen == 0) { free(cmd); break; }
+
+            // Trim trailing newline(s)
             while (clen && (cmd[clen-1] == '\n' || cmd[clen-1] == '\r')) cmd[--clen] = '\0';
 
-            // Builtin exit ends session
-            // NOTE: we do quote-aware parse, so catch trivial "exit" quickly:
+            LOG_RX("Received command: \"%s\" from client.", cmd);
+
             if (strcmp(cmd, "exit") == 0) {
-                free(cmd);
-                send_frame(cfd, "", 0); // ack/close
-                break;
+                LOG_INFO("Closing session on 'exit'.");
+                free(cmd); send_frame(cfd, "", 0); break;
             }
 
-            // Tokenize like Phase 1 (quote-aware); then run and capture.
+            // Tokenize (Phase-1)
             char **tokens = parse_command(cmd);
+
+            // Execute with capture
+            LOG_EX("Executing command: \"%s\"", cmd);
             char *payload = NULL; size_t plen = 0; const char *errmsg = NULL;
             if (run_command_capture(tokens, &payload, &plen, &errmsg) < 0) {
-                const char *msg = errmsg ? errmsg : "internal error";
+                LOG_ERR("Internal failure (pipe/fork).");
+                const char *msg = "internal error\n";
                 send_frame(cfd, msg, (uint32_t)strlen(msg));
-            } else {
-                send_frame(cfd, payload, (uint32_t)plen);
+            } 
+            else {
+                if (errmsg) {
+                    // parse-time error (syntax/redirs/pipes)
+                    LOG_ERR("%s", errmsg);
+                    LOG_OUT("Sending error message to client: \"%s\"", errmsg);
+                }
+                else {
+                    char prev[160]; preview_payload(payload, plen, 120, prev, sizeof prev);
+                    LOG_OUT("Sending output to client: %s", prev[0] ? prev : "(empty)");
+                }
             }
-
-            // cleanup
+            send_frame(cfd, payload, (uint32_t)plen);
             free(payload);
-            free(tokens); // consistent with your Phase-1 ownership
+            free(tokens);
             free(cmd);
         }
 
         close(cfd);
-        fprintf(stderr, "[server] client disconnected\n");
+        LOG_INFO("Client disconnected.");
     }
 
     close(lfd);
