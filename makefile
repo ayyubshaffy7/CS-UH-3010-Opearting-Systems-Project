@@ -4,19 +4,23 @@ CC = gcc
 # Compiler flags: -g for debugging, -Wall for all warnings
 CFLAGS = -g -Wall
 
-# The target executable name
-TARGET = myshell
-
-# The source files
-SOURCES = main.c utils.c
+# binaries
+TARGETS = myshell server client
 
 # Default rule that builds the target
-all: $(TARGET)
+all: $(TARGETS)
 
-# Rule to link the object files into the final executable
-$(TARGET): $(SOURCES)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCES)
+# phase 1 local shell
+myshell: main.c utils.c
+	$(CC) $(CFLAGS) -o $@ main.c utils.c
 
-# Rule to clean up the directory (remove executable)
+# phase 2 server (reuses utils + net)
+server: server.c utils.c net.c
+	$(CC) $(CFLAGS) -o $@ server.c utils.c net.c
+
+# phase 2 client (just net)
+client: client.c net.c
+	$(CC) $(CFLAGS) -o $@ client.c net.c
+
 clean:
-	rm -f $(TARGET) *.txt a2 a3 a4 a5 a6 a7 *.log input output
+	rm -f $(TARGETS) *.o *.txt a2 a3 a4 a5 a6 a7 *.log input output
