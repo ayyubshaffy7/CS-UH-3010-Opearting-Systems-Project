@@ -26,20 +26,6 @@ static void log_line(const char *tag, const char *fmt, ...) {
 #define LOG_OUT(...)  log_line("OUTPUT", __VA_ARGS__)
 #define LOG_ERR(...)  log_line("ERROR", __VA_ARGS__)
 
-// show a printable preview of payload (newlines escaped) up to N chars
-static void preview_payload(const char *data, size_t len, size_t N, char *out, size_t outcap) {
-    size_t w = 0;
-    for (size_t i = 0; i < len && w + 4 < outcap && N > 0; i++, N--) {
-        unsigned char c = (unsigned char)data[i];
-        if (c == '\n') { out[w++]='\\'; out[w++]='n'; }
-        else if (c == '\r') { out[w++]='\\'; out[w++]='r'; }
-        else if (c == '\t') { out[w++]='\\'; out[w++]='t'; }
-        else if (c < 32 || c == 127) { w += snprintf(out+w, outcap-w, "\\x%02X", c); }
-        else out[w++] = (char)c;
-    }
-    out[w] = '\0';
-}
-
 // server.c
 // Capture combined stdout+stderr of a parsed command line.
 // On parse error (bad pipes/redirs), we return that error as text payload (newline-terminated)
@@ -53,9 +39,11 @@ static void preview_payload(const char *data, size_t len, size_t N, char *out, s
 //   - *errmsg is only used for internal branching; we materialize parse errors into out_buf.
 static int run_command_capture(char **tokens,
                                char **out_buf, size_t *out_len,
-                               const char **errmsg)
+                               const char **errmsg, char **err_buf, size_t *err_len)
 {
     *out_buf = NULL; *out_len = 0; *errmsg = NULL;
+    if (err_buf) *err_buf = NULL;
+    if (err_len) *err_len = 0;
 
     // Build pipeline
     Stage *stages = NULL;
@@ -74,66 +62,91 @@ static int run_command_capture(char **tokens,
         return 0;
     }
 
-    // Pipe to capture child's stdout+stderr
-    int pfd[2];
-    if (pipe(pfd) < 0) { free(stages); return -1; }
+    // Pipes to capture child's stdout+stderr
+    int out_pfd[2]; 
+    int err_pfd[2]; 
+    if (pipe(out_pfd) < 0) { free(stages); return -1; }
+    if (pipe(err_pfd) < 0) { close(out_pfd[0]); close(out_pfd[1]); free(stages); return -1; }
 
     pid_t pid = fork();
-    if (pid < 0) { close(pfd[0]); close(pfd[1]); free(stages); return -1; }
+    if (pid < 0) { 
+        close(out_pfd[0]); close(out_pfd[1]);
+        close(err_pfd[0]); close(err_pfd[1]);
+        free(stages);
+        return -1;
+    }
 
     if (pid == 0) {
-        // Child: route both stdout and stderr into pfd[1], then run pipeline.
-        close(pfd[0]);
-        if (dup2(pfd[1], STDOUT_FILENO) < 0) exit(127);
-        if (dup2(pfd[1], STDERR_FILENO) < 0) exit(127);
-        close(pfd[1]);
-        exec_pipeline(stages, nstages);
+        close(out_pfd[0]); close(err_pfd[0]);
+
+        if (dup2(out_pfd[1], STDOUT_FILENO) < 0) _exit(127);
+        if (dup2(out_pfd[1], STDERR_FILENO) < 0) _exit(127);
+        // keep out_pfd[1] open as stdout/stderr
+        // pass err_pfd[1] to exec_pipeline for mirroring error lines:
+        exec_pipeline(stages, nstages, err_pfd[1]);
+        // close write end before exit so parent sees EOF
+        close(err_pfd[1]);
         exit(0);
     }
 
     // Parent: read everything the child writes
-    close(pfd[1]);
-    size_t cap = 4096, len = 0;
-    char *buf = malloc(cap);
-    if (!buf) { close(pfd[0]); free(stages); return -1; }
+    close(out_pfd[1]); close(err_pfd[1]);  // close write ends, read both streams
 
+    // read OUT payload
+    size_t ocap = 4096, olen = 0; char *obuf = malloc(ocap);
+    if (!obuf) { close(out_pfd[0]); close(err_pfd[0]); free(stages); return -1; }
     for (;;) {
-        char tmp[4096];
-        ssize_t r = read(pfd[0], tmp, sizeof tmp);
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            free(buf); close(pfd[0]); free(stages); return -1;
-        }
-        if (r == 0) break; // EOF
-        if (len + (size_t)r > cap) {
-            cap = (len + (size_t)r) * 2;
-            char *nb = realloc(buf, cap);
-            if (!nb) { free(buf); close(pfd[0]); free(stages); return -1; }
-            buf = nb;
-        }
-        memcpy(buf + len, tmp, (size_t)r);
-        len += (size_t)r;
+        char tmp[4096]; ssize_t r = read(out_pfd[0], tmp, sizeof tmp);
+        if (r < 0) { if (errno == EINTR) continue; free(obuf); close(out_pfd[0]); close(err_pfd[0]); free(stages); return -1; }
+        if (r == 0) break;
+        if (olen + (size_t)r > ocap) { ocap = (olen + (size_t)r) * 2; char *nb = realloc(obuf, ocap); if (!nb){ free(obuf); close(out_pfd[0]); close(err_pfd[0]); free(stages); return -1;} obuf = nb; }
+        memcpy(obuf + olen, tmp, (size_t)r); olen += (size_t)r;
     }
-    close(pfd[0]);
+    close(out_pfd[0]);
+
+    // read ERR payload (may be empty)
+    size_t ecap = 256, elen = 0; char *ebuf = malloc(ecap);
+    if (!ebuf) { free(obuf); close(err_pfd[0]); free(stages); return -1; }
+    for (;;) {
+        char tmp[256]; ssize_t r = read(err_pfd[0], tmp, sizeof tmp);
+        if (r < 0) { if (errno == EINTR) continue; free(ebuf); free(obuf); close(err_pfd[0]); free(stages); return -1; }
+        if (r == 0) break;
+        if (elen + (size_t)r > ecap) { ecap = (elen + (size_t)r) * 2; char *nb = realloc(ebuf, ecap); if (!nb){ free(ebuf); free(obuf); close(err_pfd[0]); free(stages); return -1;} ebuf = nb; }
+        memcpy(ebuf + elen, tmp, (size_t)r); elen += (size_t)r;
+    }
+    close(err_pfd[0]);
 
     int status; waitpid(pid, &status, 0);
     free(stages);
 
-    *out_buf = buf;
-    *out_len = len;
+    *out_buf = obuf; *out_len = olen;
+    if (err_buf) *err_buf = ebuf; else free(ebuf);
+    if (err_len) *err_len = elen;
     return 0;
 }
 
 // Simple length-prefixed protocol: [uint32 length][payload]
 static int recv_frame(int fd, char **buf, uint32_t *len) {
     uint32_t be;
-    if (readn(fd, &be, 4) != 4) return -1;
+    ssize_t r = readn(fd, &be, 4);
+    if (r == 0) {                 // peer closed before sending header
+        return 1;                 // <-- signal clean disconnect
+    }
+    if (r < 0) return -1;         // I/O error
+    if (r != 4) return -2;        // partial header -> protocol error
+
     *len = ntohl(be);
     *buf = NULL;
-    if (*len == 0) return 0;
+
+    if (*len == 0) return 0;      // empty frame is valid (e.g., exit ACK)
+
     *buf = malloc(*len + 1);
     if (!*buf) return -1;
-    if (readn(fd, *buf, *len) != (ssize_t)*len) { free(*buf); *buf = NULL; return -1; }
+
+    r = readn(fd, *buf, *len);
+    if (r < 0) { free(*buf); *buf = NULL; return -1; }
+    if ((uint32_t)r != *len) { free(*buf); *buf = NULL; return -2; }
+
     (*buf)[*len] = '\0';
     return 0;
 }
@@ -159,12 +172,22 @@ int main(int argc, char **argv) {
         if (cfd < 0) { if (errno == EINTR) continue; perror("accept"); break; }
 
         char ip[32]; inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip);
-        LOG_INFO("Client connected from %s:%u.", ip, ntohs(peer.sin_port));
+        LOG_INFO("Client connected.");
 
         for (;;) {
             char *cmd = NULL; uint32_t clen = 0;
-            if (recv_frame(cfd, &cmd, &clen) < 0) { LOG_ERR("Receive error or closed by peer."); break; }
-            if (clen == 0) { free(cmd); break; }
+            int rf = recv_frame(cfd, &cmd, &clen);
+            if (rf == 1) {                        // clean EOF (Ctrl+C or client quit)
+                break;
+            }
+            if (rf < 0) {                         // -1 I/O error, -2 protocol error
+                LOG_ERR("Receive error from client.");
+                break;
+            }
+            if (clen == 0) {                      // valid empty frame (e.g., after 'exit')
+                free(cmd);
+                break;
+            }
 
             // Trim trailing newline(s)
             while (clen && (cmd[clen-1] == '\n' || cmd[clen-1] == '\r')) cmd[--clen] = '\0';
@@ -181,24 +204,43 @@ int main(int argc, char **argv) {
 
             // Execute with capture
             LOG_EX("Executing command: \"%s\"", cmd);
-            char *payload = NULL; size_t plen = 0; const char *errmsg = NULL;
-            if (run_command_capture(tokens, &payload, &plen, &errmsg) < 0) {
+            char *payload = NULL; size_t plen = 0;
+            char *errtxt = NULL; size_t elen = 0;
+            const char *perr = NULL;
+            if (run_command_capture(tokens, &payload, &plen, &perr, &errtxt, &elen) < 0) {
                 LOG_ERR("Internal failure (pipe/fork).");
                 const char *msg = "internal error\n";
                 send_frame(cfd, msg, (uint32_t)strlen(msg));
             } 
             else {
-                if (errmsg) {
-                    // parse-time error (syntax/redirs/pipes)
-                    LOG_ERR("%s", errmsg);
-                    LOG_OUT("Sending error message to client: \"%s\"", errmsg);
+                if (perr) {
+                    LOG_ERR("%s", perr);
+                    LOG_OUT("Sending error message to client: \"%s\"", perr);
+                } else if (elen > 0) {
+                    // We got explicit error text from exec failure
+                    // The first token is in `cmd` already; log like the rubric:
+                    LOG_ERR("Command not found: \"%s\"", cmd);
+                    size_t eshow = elen > 2000 ? 2000 : elen;
+                    if (eshow == 0) {
+                        LOG_OUT("Sending error message to client: (empty)");
+                    } else {
+                        LOG_OUT("Sending error message to client: \"%.*s%s\"",
+                                (int)eshow, errtxt,
+                                (elen > eshow ? "\n..." : ""));
+                    }
+                } else {
+                    size_t show = plen > 2000 ? 2000 : plen;   // cap to keep logs sane
+                    if (show == 0) {
+                        LOG_OUT("Sending output to client: (empty)");
+                    } else {
+                        LOG_OUT("Sending output to client:\n%.*s%s",
+                                (int)show, payload,
+                                (plen > show ? "\n..." : ""));
+                    }
                 }
-                else {
-                    char prev[160]; preview_payload(payload, plen, 120, prev, sizeof prev);
-                    LOG_OUT("Sending output to client: %s", prev[0] ? prev : "(empty)");
-                }
+                send_frame(cfd, payload, (uint32_t)plen);
             }
-            send_frame(cfd, payload, (uint32_t)plen);
+            free(errtxt);
             free(payload);
             free(tokens);
             free(cmd);

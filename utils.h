@@ -23,6 +23,12 @@ int build_pipeline(char **tokens, Stage **stages_out, int *nstages_out, const ch
 
 // execute an already-built pipeline
 // returns 0 on success; -1 on immediate setup failure
-int exec_pipeline(Stage *stages, int nstages);
+// NEW argument: err_fd is the fd of the pipe for communicating error msgs between parent and child
+int exec_pipeline(Stage *stages, int nstages, int err_fd);
+
+// writes a formatted error message directly to a file descriptor (e.g., a pipe or stderr).
+// works like printf(), but instead of printing to stdout, it sends the formatted output
+// to the provided file descriptor. Useful for mirroring error messages to another process
+void err_write(int err_fd, const char *fmt, ...);
 
 #endif //UTILS_H

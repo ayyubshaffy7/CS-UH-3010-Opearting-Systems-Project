@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -31,6 +32,16 @@ static void push_tok(Tok **arr, int *n, int *cap, char *buf, int quoted_any) {
 static int has_glob_chars(const char *s){
     for (; *s; s++) if (*s=='*' || *s=='?' || *s=='[') return 1;
     return 0;
+}
+
+void err_write(int err_fd, const char *fmt, ...) {
+    if (err_fd < 0) return;
+    va_list ap; va_start(ap, fmt);
+    // dprintf-style: write directly to the pipe fd
+    char buf[512];
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n > 0) (void)write(err_fd, buf, (size_t)n);
 }
 
 /*
@@ -286,7 +297,7 @@ int build_pipeline(char **tokens, Stage **stages_out, int *nstages_out, const ch
  * input is S (stages with argv + redirs) and n (# of stages)
  * function returns 0 on success, -1 on immediate setup failure (e.g., pipe/fork OOM)
 */
-int exec_pipeline(Stage *S, int n) {
+int exec_pipeline(Stage *S, int n, int err_fd) {
     // if just one stage -> no pipes, only redirs + exec
     if (n == 1) {
         pid_t pid = fork();
@@ -316,14 +327,17 @@ int exec_pipeline(Stage *S, int n) {
                 if (errno == ENOENT) {
                     if (S[0].argv[0][0] == '.' && S[0].argv[0][1] == '/') {               // in order to immitate bash behavior, we check if 
                         fprintf(stderr, "%s: No such file or directory\n", S[0].argv[0]); // the executable exists, so we can give identical err msg
+                        err_write(err_fd, "%s: No such file or directory", S[0].argv[0]);
                     }
                     else {
                         fprintf(stderr, "%s: command not found\n", S[0].argv[0]); // otherwise exec failed cos command doesn't exist
+                        err_write(err_fd, "%s: command not found", S[0].argv[0]);
                     }
                 }
                 else {
                     // for all other errors, print the default system error
                     fprintf(stderr, "%s: %s\n", S[0].argv[0], strerror(errno));
+                    err_write(err_fd, "%s: %s", S[0].argv[0], strerror(errno));
                 }
                 exit(EXIT_FAILURE);
             }
@@ -398,14 +412,17 @@ int exec_pipeline(Stage *S, int n) {
                 if (errno == ENOENT) {
                     if (S[i].argv[0][0] == '.' && S[i].argv[0][1] == '/') {               // in order to immitate bash behavior, we check if 
                         fprintf(stderr, "%s: No such file or directory\n", S[i].argv[0]); // the executable exists, so we can give identical err msg
+                        err_write(err_fd, "%s: No such file or directory", S[i].argv[0]);
                     }
                     else {
                         fprintf(stderr, "%s: command not found\n", S[i].argv[0]); // otherwise exec failed cos command doesn't exist
+                        err_write(err_fd, "%s: command not found", S[i].argv[0]);
                     }
                 }
                 else {
                     // For all other errors, print the default system error
                     fprintf(stderr, "%s: %s\n", S[i].argv[0], strerror(errno));
+                    err_write(err_fd, "%s: %s", S[i].argv[0], strerror(errno));
                 }
                 exit(EXIT_FAILURE);
             }

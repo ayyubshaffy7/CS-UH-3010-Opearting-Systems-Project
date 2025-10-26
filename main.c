@@ -37,7 +37,7 @@ int main() {
             continue;  // prompt again
         }
 
-        if (exec_pipeline(stages, nstages) < 0) {
+        if (exec_pipeline(stages, nstages, -1) < 0) {
             // setup failure; errors already printed
         }
         free(stages);
