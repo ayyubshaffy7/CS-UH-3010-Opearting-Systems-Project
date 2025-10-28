@@ -16,13 +16,34 @@ static int send_frame(int fd, const char *buf, uint32_t len) {
 
 static int recv_frame(int fd, char **buf, uint32_t *len) {
     uint32_t be;
-    if (readn(fd, &be, 4) != 4) return -1;
-    *len = ntohl(be);
+    if (readn(fd, &be, 4) != 4)
+        return -1;
+
+    uint32_t val = ntohl(be);
+
+    // 🔸 Check for special control frame (server wants to close)
+    if (val == 0xFFFFFFFF) {
+        *buf = NULL;
+        *len = 0;
+        return 1;  // signal "session closed"
+    }
+
+    *len = val;
     *buf = NULL;
-    if (*len == 0) return 0;
+
+    if (*len == 0)
+        return 0;  // valid empty payload (e.g., command had no output)
+
     *buf = malloc(*len + 1);
-    if (!*buf) return -1;
-    if (readn(fd, *buf, *len) != (ssize_t)*len) { free(*buf); *buf = NULL; return -1; }
+    if (!*buf)
+        return -1;
+
+    if (readn(fd, *buf, *len) != (ssize_t)*len) {
+        free(*buf);
+        *buf = NULL;
+        return -1;
+    }
+
     (*buf)[*len] = '\0';
     return 0;
 }
@@ -46,17 +67,22 @@ int main(int argc, char **argv) {
 
         // read reply (may be empty)
         char *out = NULL; uint32_t olen = 0;
-        if (recv_frame(fd, &out, &olen) < 0) { fprintf(stderr, "recv error\n"); break; }
-        if (olen) {
-            // print server’s command output exactly like a local shell would
-            fwrite(out, 1, olen, stdout);
-            free(out);
-        } else {
-            // zero-length frame → session closing (e.g., after 'exit')
-            free(out);
+        int rf = recv_frame(fd, &out, &olen);
+
+        if (rf < 0) {
+            fprintf(stderr, "recv error\n");
             break;
         }
-    }
+        if (rf == 1) {
+            // special control frame (server closed session)
+            break;
+        }
+        if (olen) {
+            fwrite(out, 1, olen, stdout);
+        }
+        free(out);
+        
+        }
 
     free(line);
     close(fd);

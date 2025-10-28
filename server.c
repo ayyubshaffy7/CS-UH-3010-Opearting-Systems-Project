@@ -195,8 +195,13 @@ int main(int argc, char **argv) {
             LOG_RX("Received command: \"%s\" from client.", cmd);
 
             if (strcmp(cmd, "exit") == 0) {
-                LOG_INFO("Closing session on 'exit'.");
-                free(cmd); send_frame(cfd, "", 0); break;
+            LOG_INFO("Closing session on 'exit'.");
+            free(cmd);
+            // special 0xFFFFFFFF control frame for clean disconnect
+            uint32_t close_flag = htonl(0xFFFFFFFF);
+            writen(cfd, &close_flag, 4);
+
+            break;
             }
 
             // Tokenize (Phase-1)
