@@ -2,7 +2,7 @@
 CC = gcc
 
 # Compiler flags: -g for debugging, -Wall for all warnings
-CFLAGS = -g -Wall
+CFLAGS = -g -Wall -pthread
 
 # binaries
 TARGETS = myshell server client

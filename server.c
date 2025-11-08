@@ -1,17 +1,33 @@
+// server.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
-#include <stdarg.h> 
+#include <stdarg.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#include <pthread.h> // <-- 1. INCLUDE PTHREAD
 #include "net.h"
 #include "utils.h"
 
+// --- NEW (Phase 3) ---
+// This struct will be passed to each new thread.
+// It contains all the info the thread needs for the session.
+typedef struct {
+    int cfd;                 // Client's file descriptor
+    uint32_t client_id;      // Client's unique ID (e.g., 1, 2, 3...)
+    struct sockaddr_in peer; // Client's address info
+} client_info_t;
+
+// A global counter for assigning unique client IDs
+static int g_client_counter = 0;
+// --- END NEW ---
+
+// Standard log function (for non-prefixed messages)
 static void log_line(const char *tag, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     fprintf(stderr, "[%s] ", tag);
@@ -20,23 +36,24 @@ static void log_line(const char *tag, const char *fmt, ...) {
     va_end(ap);
 }
 
-#define LOG_INFO(...) log_line("INFO", __VA_ARGS__)
-#define LOG_RX(...)   log_line("RECEIVED", __VA_ARGS__)
-#define LOG_EX(...)   log_line("EXECUTING", __VA_ARGS__)
-#define LOG_OUT(...)  log_line("OUTPUT", __VA_ARGS__)
-#define LOG_ERR(...)  log_line("ERROR", __VA_ARGS__)
+// --- NEW (Phase 3) ---
+// New log function for thread-specific, prefixed messages
+// e.g., [TAG] [Client #1 - 127.0.0.1:12345] ...
+static void log_line_prefixed(const char *tag, const char *prefix, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    fprintf(stderr, "[%s] %s ", tag, prefix); // [TAG] [Client #1 - ...]
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+}
+// --- END NEW ---
 
-// server.c
-// Capture combined stdout+stderr of a parsed command line.
-// On parse error (bad pipes/redirs), we return that error as text payload (newline-terminated)
-// so the client prints it like a real shell would.
-//
-// Returns 0 on success (payload captured and returned).
-// Returns -1 only on immediate setup failure (pipe/fork/malloc).
-//
-// Ownership:
-//   - *out_buf is malloc'd here; caller must free(*out_buf).
-//   - *errmsg is only used for internal branching; we materialize parse errors into out_buf.
+#define LOG_INFO(...) log_line("INFO", __VA_ARGS__)
+// We will call log_line_prefixed directly in the thread, so no other macros are needed.
+
+
+// This function is UNCHANGED from Phase 2.
+// It captures the output of the shell logic from utils.c
 static int run_command_capture(char **tokens,
                                char **out_buf, size_t *out_len,
                                const char **errmsg, char **err_buf, size_t *err_len)
@@ -49,7 +66,6 @@ static int run_command_capture(char **tokens,
     Stage *stages = NULL;
     int nstages = 0;
     if (build_pipeline(tokens, &stages, &nstages, errmsg) < 0) {
-        // Convert parse-time error into textual payload for the client.
         size_t l = strlen(*errmsg);
         char *buf = malloc(l + 2);
         if (!buf) return -1;
@@ -58,18 +74,17 @@ static int run_command_capture(char **tokens,
         buf[l+1] = '\0';
         *out_buf = buf;
         *out_len = l + 1;
-        *errmsg = NULL; // handled as payload
+        *errmsg = NULL;
         return 0;
     }
 
-    // Pipes to capture child's stdout+stderr
-    int out_pfd[2]; 
-    int err_pfd[2]; 
+    int out_pfd[2];
+    int err_pfd[2];
     if (pipe(out_pfd) < 0) { free(stages); return -1; }
     if (pipe(err_pfd) < 0) { close(out_pfd[0]); close(out_pfd[1]); free(stages); return -1; }
 
     pid_t pid = fork();
-    if (pid < 0) { 
+    if (pid < 0) {
         close(out_pfd[0]); close(out_pfd[1]);
         close(err_pfd[0]); close(err_pfd[1]);
         free(stages);
@@ -78,21 +93,15 @@ static int run_command_capture(char **tokens,
 
     if (pid == 0) {
         close(out_pfd[0]); close(err_pfd[0]);
-
         if (dup2(out_pfd[1], STDOUT_FILENO) < 0) _exit(127);
         if (dup2(out_pfd[1], STDERR_FILENO) < 0) _exit(127);
-        // keep out_pfd[1] open as stdout/stderr
-        // pass err_pfd[1] to exec_pipeline for mirroring error lines:
         exec_pipeline(stages, nstages, err_pfd[1]);
-        // close write end before exit so parent sees EOF
         close(err_pfd[1]);
         exit(0);
     }
 
-    // Parent: read everything the child writes
-    close(out_pfd[1]); close(err_pfd[1]);  // close write ends, read both streams
+    close(out_pfd[1]); close(err_pfd[1]);
 
-    // read OUT payload
     size_t ocap = 4096, olen = 0; char *obuf = malloc(ocap);
     if (!obuf) { close(out_pfd[0]); close(err_pfd[0]); free(stages); return -1; }
     for (;;) {
@@ -104,7 +113,6 @@ static int run_command_capture(char **tokens,
     }
     close(out_pfd[0]);
 
-    // read ERR payload (may be empty)
     size_t ecap = 256, elen = 0; char *ebuf = malloc(ecap);
     if (!ebuf) { free(obuf); close(err_pfd[0]); free(stages); return -1; }
     for (;;) {
@@ -125,20 +133,18 @@ static int run_command_capture(char **tokens,
     return 0;
 }
 
-// Simple length-prefixed protocol: [uint32 length][payload]
+// These two framing functions are UNCHANGED from Phase 2.
 static int recv_frame(int fd, char **buf, uint32_t *len) {
     uint32_t be;
     ssize_t r = readn(fd, &be, 4);
-    if (r == 0) {                 // peer closed before sending header
-        return 1;                 // <-- signal clean disconnect
-    }
-    if (r < 0) return -1;         // I/O error
-    if (r != 4) return -2;        // partial header -> protocol error
+    if (r == 0) { return 1; }
+    if (r < 0) return -1;
+    if (r != 4) return -2;
 
     *len = ntohl(be);
     *buf = NULL;
 
-    if (*len == 0) return 0;      // empty frame is valid (e.g., exit ACK)
+    if (*len == 0) return 0;
 
     *buf = malloc(*len + 1);
     if (!*buf) return -1;
@@ -158,6 +164,104 @@ static int send_frame(int fd, const char *buf, uint32_t len) {
     return 0;
 }
 
+// --- NEW (Phase 3) ---
+// This is the new thread function.
+// ALL of the client session logic from Phase 2's main() is moved here.
+void *client_thread_func(void *arg) {
+    // Detach the thread so its resources are automatically freed on exit
+    pthread_detach(pthread_self());
+
+    // 1. Unpack the client info
+    client_info_t *info = (client_info_t *)arg;
+    int cfd = info->cfd;
+    int client_id = info->client_id;
+
+    // 2. Create the log prefix string for this client
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &info->peer.sin_addr, ip, sizeof ip);
+    uint16_t port = ntohs(info->peer.sin_port);
+    char client_prefix[128];
+    snprintf(client_prefix, sizeof client_prefix, "[Client #%d - %s:%u]", client_id, ip, port);
+
+    // 3. Log the "connected" message (matches spec)
+    LOG_INFO("Client #%d connected from %s:%u. Assigned to Thread-%d.",
+             client_id, ip, port, client_id);
+
+    // 4. This is the client session loop, (copied from Phase 2's main)
+    for (;;) {
+        char *cmd = NULL; uint32_t clen = 0;
+        int rf = recv_frame(cfd, &cmd, &clen);
+        if (rf == 1) { break; } // clean EOF
+        if (rf < 0) {
+            log_line_prefixed("ERROR", client_prefix, "Receive error from client.");
+            break;
+        }
+        if (clen == 0) {
+            free(cmd);
+            break;
+        }
+
+        while (clen && (cmd[clen-1] == '\n' || cmd[clen-1] == '\r')) cmd[--clen] = '\0';
+
+        // Use the new log format
+        log_line_prefixed("RECEIVED", client_prefix, "Received command: \"%s\"", cmd);
+
+        if (strcmp(cmd, "exit") == 0) {
+            log_line_prefixed("INFO", client_prefix, "Client requested disconnect. Closing connection.");
+            free(cmd);
+            uint32_t close_flag = htonl(0xFFFFFFFF);
+            writen(cfd, &close_flag, 4);
+            break;
+        }
+
+        char **tokens = parse_command(cmd);
+        log_line_prefixed("EXECUTING", client_prefix, "Executing command: \"%s\"", cmd);
+
+        char *payload = NULL; size_t plen = 0;
+        char *errtxt = NULL; size_t elen = 0;
+        const char *perr = NULL;
+        if (run_command_capture(tokens, &payload, &plen, &perr, &errtxt, &elen) < 0) {
+            log_line_prefixed("ERROR", client_prefix, "Internal failure (pipe/fork).");
+            const char *msg = "internal error\n";
+            send_frame(cfd, msg, (uint32_t)strlen(msg));
+        }
+        else {
+            if (perr) {
+                log_line_prefixed("ERROR", client_prefix, "%s", perr);
+                log_line_prefixed("OUTPUT", client_prefix, "Sending error message to client: \"%s\"", perr);
+            } else if (elen > 0) {
+                while (elen && (errtxt[elen-1] == '\n' || errtxt[elen-1] == '\r')) errtxt[--elen] = '\0';
+                log_line_prefixed("ERROR", client_prefix, "Command not found: \"%s\"", cmd);
+                log_line_prefixed("OUTPUT", client_prefix, "Sending error message to client: \"%.*s\"", (int)elen, errtxt);
+            } else {
+                size_t show = plen > 2000 ? 2000 : plen;
+                if (show == 0) {
+                    log_line_prefixed("OUTPUT", client_prefix, "Sending output to client: (empty)");
+                } else {
+                    log_line_prefixed("OUTPUT", client_prefix, "Sending output to client:\n%.*s%s",
+                                      (int)show, payload, (plen > show ? "\n..." : ""));
+                }
+            }
+            send_frame(cfd, payload, (uint32_t)plen);
+        }
+        free(errtxt);
+        free(payload);
+        free(tokens);
+        free(cmd);
+    }
+
+    // 5. Cleanup
+    close(cfd);
+    LOG_INFO("Client #%d disconnected.", client_id);
+    free(info);
+    return NULL;
+}
+// --- END NEW ---
+
+
+// --- MODIFIED (Phase 3) ---
+// Main is now MUCH simpler.
+// It just accepts connections and spawns threads.
 int main() {
     uint16_t port = 5050;
     int lfd = tcp_listen(port);
@@ -169,90 +273,29 @@ int main() {
         int cfd = accept(lfd, (struct sockaddr*)&peer, &pl);
         if (cfd < 0) { if (errno == EINTR) continue; perror("accept"); break; }
 
-        char ip[32]; inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip);
-        LOG_INFO("Client connected.");
-
-        for (;;) {
-            char *cmd = NULL; uint32_t clen = 0;
-            int rf = recv_frame(cfd, &cmd, &clen);
-            if (rf == 1) {                        // clean EOF (Ctrl+C or client quit)
-                break;
-            }
-            if (rf < 0) {                         // -1 I/O error, -2 protocol error
-                LOG_ERR("Receive error from client.");
-                break;
-            }
-            if (clen == 0) {                      // valid empty frame (e.g., after 'exit')
-                free(cmd);
-                break;
-            }
-
-            // Trim trailing newline(s)
-            while (clen && (cmd[clen-1] == '\n' || cmd[clen-1] == '\r')) cmd[--clen] = '\0';
-
-            LOG_RX("Received command: \"%s\" from client.", cmd);
-
-            if (strcmp(cmd, "exit") == 0) {
-            LOG_INFO("Closing session on 'exit'.");
-            free(cmd);
-            // special 0xFFFFFFFF control frame for clean disconnect
-            uint32_t close_flag = htonl(0xFFFFFFFF);
-            writen(cfd, &close_flag, 4);
-
-            break;
-            }
-
-            // Tokenize (Phase-1)
-            char **tokens = parse_command(cmd);
-
-            // Execute with capture
-            LOG_EX("Executing command: \"%s\"", cmd);
-            char *payload = NULL; size_t plen = 0;
-            char *errtxt = NULL; size_t elen = 0;
-            const char *perr = NULL;
-            if (run_command_capture(tokens, &payload, &plen, &perr, &errtxt, &elen) < 0) {
-                LOG_ERR("Internal failure (pipe/fork).");
-                const char *msg = "internal error\n";
-                send_frame(cfd, msg, (uint32_t)strlen(msg));
-            } 
-            else {
-                if (perr) {
-                    LOG_ERR("%s", perr);
-                    LOG_OUT("Sending error message to client: \"%s\"", perr);
-                } else if (elen > 0) {
-                    // We got explicit error text from exec failure
-                    // The first token is in `cmd` already; log like the rubric:
-                    LOG_ERR("Command not found: \"%s\"", cmd);
-                    size_t eshow = elen > 2000 ? 2000 : elen;
-                    if (eshow == 0) {
-                        LOG_OUT("Sending error message to client: (empty)");
-                    } else {
-                        LOG_OUT("Sending error message to client: \"%.*s%s\"",
-                                (int)eshow, errtxt,
-                                (elen > eshow ? "\n..." : ""));
-                    }
-                } else {
-                    size_t show = plen > 2000 ? 2000 : plen;   // cap to keep logs sane
-                    if (show == 0) {
-                        LOG_OUT("Sending output to client: (empty)");
-                    } else {
-                        LOG_OUT("Sending output to client:\n%.*s%s",
-                                (int)show, payload,
-                                (plen > show ? "\n..." : ""));
-                    }
-                }
-                send_frame(cfd, payload, (uint32_t)plen);
-            }
-            free(errtxt);
-            free(payload);
-            free(tokens);
-            free(cmd);
+        // 1. Malloc a new info struct for this client
+        client_info_t *info = malloc(sizeof(client_info_t));
+        if (!info) {
+            LOG_INFO("Failed to allocate memory for new client.");
+            close(cfd);
+            continue;
         }
 
-        close(cfd);
-        LOG_INFO("Client disconnected.");
+        // 2. Fill the struct
+        info->cfd = cfd;
+        info->client_id = ++g_client_counter;
+        info->peer = peer;
+
+        // 3. Create the new thread
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, client_thread_func, info) != 0) {
+            LOG_INFO("Failed to create thread for client #%d", info->client_id);
+            free(info);
+            close(cfd);
+        }
     }
 
     close(lfd);
     return 0;
 }
+// --- END MODIFIED ---
