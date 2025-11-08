@@ -1,4 +1,3 @@
-// server.c
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,11 +9,10 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <arpa/inet.h>
-#include <pthread.h> // <-- 1. INCLUDE PTHREAD
+#include <pthread.h>
 #include "net.h"
 #include "utils.h"
 
-// --- NEW (Phase 3) ---
 // This struct will be passed to each new thread.
 // It contains all the info the thread needs for the session.
 typedef struct {
@@ -25,7 +23,6 @@ typedef struct {
 
 // A global counter for assigning unique client IDs
 static int g_client_counter = 0;
-// --- END NEW ---
 
 // Standard log function (for non-prefixed messages)
 static void log_line(const char *tag, const char *fmt, ...) {
@@ -36,8 +33,7 @@ static void log_line(const char *tag, const char *fmt, ...) {
     va_end(ap);
 }
 
-// --- NEW (Phase 3) ---
-// New log function for thread-specific, prefixed messages
+// log function for thread-specific, prefixed messages
 // e.g., [TAG] [Client #1 - 127.0.0.1:12345] ...
 static void log_line_prefixed(const char *tag, const char *prefix, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -46,7 +42,6 @@ static void log_line_prefixed(const char *tag, const char *prefix, const char *f
     fputc('\n', stderr);
     va_end(ap);
 }
-// --- END NEW ---
 
 #define LOG_INFO(...) log_line("INFO", __VA_ARGS__)
 // We will call log_line_prefixed directly in the thread, so no other macros are needed.
@@ -164,30 +159,28 @@ static int send_frame(int fd, const char *buf, uint32_t len) {
     return 0;
 }
 
-// --- NEW (Phase 3) ---
-// This is the new thread function.
-// ALL of the client session logic from Phase 2's main() is moved here.
+// ALL of the client session logic from Phase 2's main() is moved to this thread function
 void *client_thread_func(void *arg) {
     // Detach the thread so its resources are automatically freed on exit
     pthread_detach(pthread_self());
 
-    // 1. Unpack the client info
+    // Unpack the client info
     client_info_t *info = (client_info_t *)arg;
     int cfd = info->cfd;
     int client_id = info->client_id;
 
-    // 2. Create the log prefix string for this client
+    // Create the log prefix string for this client
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &info->peer.sin_addr, ip, sizeof ip);
     uint16_t port = ntohs(info->peer.sin_port);
     char client_prefix[128];
     snprintf(client_prefix, sizeof client_prefix, "[Client #%d - %s:%u]", client_id, ip, port);
 
-    // 3. Log the "connected" message (matches spec)
+    // Log the "connected" message (matches spec)
     LOG_INFO("Client #%d connected from %s:%u. Assigned to Thread-%d.",
              client_id, ip, port, client_id);
 
-    // 4. This is the client session loop, (copied from Phase 2's main)
+    // This is the client session loop, (copied from Phase 2's main)
     for (;;) {
         char *cmd = NULL; uint32_t clen = 0;
         int rf = recv_frame(cfd, &cmd, &clen);
@@ -204,6 +197,7 @@ void *client_thread_func(void *arg) {
         while (clen && (cmd[clen-1] == '\n' || cmd[clen-1] == '\r')) cmd[--clen] = '\0';
 
         // Use the new log format
+        fprintf(stderr, "\n");
         log_line_prefixed("RECEIVED", client_prefix, "Received command: \"%s\"", cmd);
 
         if (strcmp(cmd, "exit") == 0) {
@@ -236,10 +230,17 @@ void *client_thread_func(void *arg) {
             } else {
                 size_t show = plen > 2000 ? 2000 : plen;
                 if (show == 0) {
-                    log_line_prefixed("OUTPUT", client_prefix, "Sending output to client: (empty)");
+                    log_line_prefixed("OUTPUT", client_prefix,
+                                    "Sending output to client: (empty)");
                 } else {
-                    log_line_prefixed("OUTPUT", client_prefix, "Sending output to client:\n%.*s%s",
-                                      (int)show, payload, (plen > show ? "\n..." : ""));
+                    // Trim trailing newlines from the preview so we don't end up with
+                    // extra blank lines in the log. (Only for logging; payload sent is unchanged.)
+                    size_t trimmed = show;
+                    while (trimmed > 0 &&
+                        (payload[trimmed-1] == '\n' || payload[trimmed-1] == '\r')) {
+                        trimmed--;
+                    }
+                    log_line_prefixed("OUTPUT", client_prefix, "Sending output to client:\n%.*s", (int)trimmed, payload);
                 }
             }
             send_frame(cfd, payload, (uint32_t)plen);
@@ -250,16 +251,13 @@ void *client_thread_func(void *arg) {
         free(cmd);
     }
 
-    // 5. Cleanup
+    // Cleanup
     close(cfd);
     LOG_INFO("Client #%d disconnected.", client_id);
     free(info);
     return NULL;
 }
-// --- END NEW ---
 
-
-// --- MODIFIED (Phase 3) ---
 // Main is now MUCH simpler.
 // It just accepts connections and spawns threads.
 int main() {
@@ -273,7 +271,7 @@ int main() {
         int cfd = accept(lfd, (struct sockaddr*)&peer, &pl);
         if (cfd < 0) { if (errno == EINTR) continue; perror("accept"); break; }
 
-        // 1. Malloc a new info struct for this client
+        // Malloc a new info struct for this client
         client_info_t *info = malloc(sizeof(client_info_t));
         if (!info) {
             LOG_INFO("Failed to allocate memory for new client.");
@@ -281,12 +279,12 @@ int main() {
             continue;
         }
 
-        // 2. Fill the struct
+        // Fill the struct
         info->cfd = cfd;
         info->client_id = ++g_client_counter;
         info->peer = peer;
 
-        // 3. Create the new thread
+        // Create the new thread
         pthread_t tid;
         if (pthread_create(&tid, NULL, client_thread_func, info) != 0) {
             LOG_INFO("Failed to create thread for client #%d", info->client_id);
@@ -298,4 +296,3 @@ int main() {
     close(lfd);
     return 0;
 }
-// --- END MODIFIED ---
