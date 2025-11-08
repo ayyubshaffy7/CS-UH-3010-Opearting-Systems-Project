@@ -158,10 +158,8 @@ static int send_frame(int fd, const char *buf, uint32_t len) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    if (argc != 2) { fprintf(stderr, "Usage: %s <port>\n", argv[0]); return 1; }
-
-    uint16_t port = (uint16_t)atoi(argv[1]);
+int main() {
+    uint16_t port = 5050;
     int lfd = tcp_listen(port);
     if (lfd < 0) { perror("listen"); return 1; }
     LOG_INFO("Server started, waiting for client connections on port %u...", port);

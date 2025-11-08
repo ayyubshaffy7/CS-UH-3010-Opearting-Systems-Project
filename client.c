@@ -49,9 +49,8 @@ static int recv_frame(int fd, char **buf, uint32_t *len) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) { fprintf(stderr, "Usage: %s <server_host> <port>\n", argv[0]); return 1; }
-    const char *host = argv[1];
-    uint16_t port = (uint16_t)atoi(argv[2]);
+    const char *host = "127.0.0.1";  // default host
+    uint16_t port = 5050;            // default port
 
     int fd = tcp_connect(host, port);
     if (fd < 0) { perror("connect"); return 1; }
