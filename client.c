@@ -21,7 +21,7 @@ static int recv_frame(int fd, char **buf, uint32_t *len) {
 
     uint32_t val = ntohl(be);
 
-    // 🔸 Check for special control frame (server wants to close)
+    // Check for special control frame (server wants to close)
     if (val == 0xFFFFFFFF) {
         *buf = NULL;
         *len = 0;
