@@ -13,7 +13,7 @@ int main(int argc, char **argv) {
     // The loop runs 0 to n-1, printing N lines total.
     for (int i = 0; i < n; i++) {
         // Strict format matching the screenshots
-        printf("Demo %d/%d\n", i, n);
+        printf("Demo %d/%d\n", i+1, n);
         fflush(stdout); // CRITICAL: Push to pipe immediately
         sleep(1);       // Simulate 1 second of work
     }

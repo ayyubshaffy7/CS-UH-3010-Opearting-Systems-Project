@@ -71,10 +71,14 @@ int main(int argc, char **argv) {
 
             if (rf < 0) {
                 fprintf(stderr, "recv error\n");
-                goto cleanup; // or break main loop
+                free(line);
+                close(fd);
+                return 0;
             }
             if (rf == 1) { // Server closed session
-                goto cleanup;
+                free(line);
+                close(fd);
+                return 0;
             }
             
             // LENGTH 0 signals END OF COMMAND in our protocol
@@ -88,7 +92,7 @@ int main(int argc, char **argv) {
             fflush(stdout); 
             free(out);
         }
-
+    }
     free(line);
     close(fd);
     return 0;
