@@ -8,9 +8,18 @@ pthread_mutex_t sched_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t sched_cond = PTHREAD_COND_INITIALIZER;
 Job *job_queue = NULL;
 
+
+typedef struct TimelineEntry {
+    int job_id;      // e.g., 1 => P1
+    int duration;    // how many "time units" this job ran in that slice
+    struct TimelineEntry *next;
+} TimelineEntry;
+
+static TimelineEntry *timeline_head = NULL;
+static TimelineEntry *timeline_tail = NULL;
+
 // For the summary string at the bottom
 static char timeline_buffer[4096];
-static bool timeline_empty = true;
 
 // Track last scheduled job to prevent immediate re-selection (unless only 1 left)
 static int last_job_id = -1; 
@@ -90,17 +99,51 @@ Job* get_next_job() {
 }
 
 void append_timeline(int job_id, int duration) {
-    char entry[64];
-    // Format: P(id)-(duration)-
-    if (timeline_empty) {
-        snprintf(entry, sizeof(entry), "P%d-(%d)", job_id, duration);
-        timeline_empty = false;
+    // Ignore bogus / non-positive slices
+    if (duration <= 0) return;
+
+    TimelineEntry *e = malloc(sizeof(*e));
+    if (!e) return;  // ignore on OOM, not worth crashing the server
+
+    e->job_id = job_id;
+    e->duration = duration;
+    e->next = NULL;
+
+    if (!timeline_head) {
+        timeline_head = timeline_tail = e;
     } else {
-        snprintf(entry, sizeof(entry), "-P%d-(%d)", job_id, duration);
+        timeline_tail->next = e;
+        timeline_tail = e;
     }
-    strncat(timeline_buffer, entry, sizeof(timeline_buffer) - strlen(timeline_buffer) - 1);
 }
 
-void print_timeline() {
-    fprintf(stderr, "%s\n", timeline_buffer);
+void print_timeline(void) {
+    if (!timeline_head) {
+        // No demo jobs ran -> no Gantt diagram
+        return;
+    }
+
+    int current_time = 0;
+    TimelineEntry *cur = timeline_head;
+
+    // Print initial "0"
+    printf("%d", current_time);
+
+    while (cur) {
+        current_time += cur->duration;  // cumulative time
+        printf(")-P%d-(%d", cur->job_id, current_time);
+        cur = cur->next;
+    }
+
+    printf("\n");
+    fflush(stdout);
+
+    // Clear the timeline after printing so the next run starts fresh
+    cur = timeline_head;
+    while (cur) {
+        TimelineEntry *next = cur->next;
+        free(cur);
+        cur = next;
+    }
+    timeline_head = timeline_tail = NULL;
 }

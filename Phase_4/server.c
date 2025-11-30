@@ -336,7 +336,8 @@ void *client_thread_func(void *arg) {
                 pthread_mutex_lock(&sched_lock);   // Reacquire to update state
                 
                 log_line_prefixed("INFO", prefix, "--- ended (-1)");
-                append_timeline(j.id, -1); // Placeholder duration
+                // IMPORTANT: shell commands are NOT part of the Gantt diagram
+                // so we do NOT call append_timeline() here.
             } else {
                 // Program Execution
                 int quantum = (j.rounds_run == 0) ? 3 : 7;
