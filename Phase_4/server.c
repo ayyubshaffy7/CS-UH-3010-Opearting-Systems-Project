@@ -62,6 +62,13 @@ int recv_frame_str(int fd, char **buf) {
     return 0;
 }
 
+static int send_frame(int fd, const char *buf, uint32_t len) {
+    uint32_t be = htonl(len);
+    if (writen(fd, &be, 4) != 4) return -1;
+    if (len && writen(fd, buf, len) != (ssize_t)len) return -1;
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // EXECUTION LOGIC
 // ---------------------------------------------------------------------------
@@ -92,16 +99,19 @@ void execute_shell_job(Job *job) {
 
     // Parent
     close(out_pfd[1]);
-    
-    // Read all output (blocking is fine here, it's non-preemptive)
     char buf[1024];
     ssize_t r;
     while ((r = read(out_pfd[0], buf, sizeof(buf))) > 0) {
-        writen(job->socket_fd, buf, r);
-        // Log bytes sent (as per screenshot requirement)
+        // USE SEND_FRAME HERE
+        send_frame(job->socket_fd, buf, (uint32_t)r);
+        
         char prefix[64]; snprintf(prefix, 64, "[%d]", job->id);
         log_line_prefixed("RECEIVED", prefix, "<<< %zd bytes sent", r);
     }
+    
+    // CRITICAL: Send empty frame to signal "End of Command"
+    send_frame(job->socket_fd, NULL, 0);
+
     close(out_pfd[0]);
     waitpid(job->pid, NULL, 0);
     job->status = JOB_FINISHED;
@@ -141,29 +151,20 @@ void execute_demo_job(Job *job, int quantum) {
         log_line_prefixed("INFO", prefix, "--- running (%d)", job->remaining_time);
     }
 
-    // 2. Read Loop (Simulate Quantum)
-    // We read line-by-line. 1 line = 1 second.
+    // 2. Read Loop
     int time_consumed = 0;
-    FILE *fp = fdopen(job->pipe_fd, "r"); // Wrap fd in FILE* for getline
-    
-    // We cannot use standard blocking getline strictly because we need to handle 
-    // the case where child finishes early. But demo.c sleeps 1s, so we are ok.
-    // Ideally we use raw read, but demo outputs lines.
+    FILE *fp = fdopen(job->pipe_fd, "r"); 
     
     char *line = NULL; size_t len = 0;
     while (time_consumed < quantum && job->remaining_time > 0) {
-        // We use a small buffer read to detect output
-        // Note: In a real robust OS, we'd use select(). 
-        // Here we rely on demo.c strictly outputting 1 line per second.
-        
         ssize_t read = getline(&line, &len, fp);
         if (read == -1) {
             job->remaining_time = 0; // EOF
             break;
         }
 
-        // Send to client
-        writen(job->socket_fd, line, read);
+        // USE SEND_FRAME HERE
+        send_frame(job->socket_fd, line, (uint32_t)read);
         
         job->remaining_time--;
         time_consumed++;
@@ -186,6 +187,9 @@ void execute_demo_job(Job *job, int quantum) {
     } else {
         waitpid(job->pid, NULL, 0);
         job->status = JOB_FINISHED;
+
+        send_frame(job->socket_fd, NULL, 0);
+
         char prefix[64]; snprintf(prefix, 64, "(%d)", job->id);
         log_line_prefixed("INFO", prefix, "--- ended (%d)", 0); // 0 remaining
         

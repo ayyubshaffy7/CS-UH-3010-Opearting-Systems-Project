@@ -64,23 +64,29 @@ int main(int argc, char **argv) {
         // send the line (including newline)
         if (send_frame(fd, line, (uint32_t)r) < 0) { fprintf(stderr, "send error\n"); break; }
 
-        // read reply (may be empty)
-        char *out = NULL; uint32_t olen = 0;
-        int rf = recv_frame(fd, &out, &olen);
+        while (1) {
+            char *out = NULL; 
+            uint32_t olen = 0;
+            int rf = recv_frame(fd, &out, &olen);
 
-        if (rf < 0) {
-            fprintf(stderr, "recv error\n");
-            break;
-        }
-        if (rf == 1) {
-            // special control frame (server closed session)
-            break;
-        }
-        if (olen) {
+            if (rf < 0) {
+                fprintf(stderr, "recv error\n");
+                goto cleanup; // or break main loop
+            }
+            if (rf == 1) { // Server closed session
+                goto cleanup;
+            }
+            
+            // LENGTH 0 signals END OF COMMAND in our protocol
+            if (olen == 0) {
+                free(out);
+                break; 
+            }
+
+            // Print chunk and flush immediately
             fwrite(out, 1, olen, stdout);
-        }
-        free(out);
-        
+            fflush(stdout); 
+            free(out);
         }
 
     free(line);
