@@ -28,6 +28,40 @@ static void log_line_prefixed(const char *tag, const char *prefix, const char *f
 }
 #define LOG_INFO(...) do { fprintf(stderr, "[INFO] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
 
+// Re-implementing a simple frame receiver compatible with the client
+int recv_frame_str(int fd, char **buf) {
+    uint32_t len;
+    ssize_t r = readn(fd, &len, 4);
+
+    if (r == 0) {
+        // clean EOF: client closed connection
+        *buf = NULL;
+        return 0;
+    }
+    if (r < 0) {
+        // error on socket
+        return -1;
+    }
+
+    len = ntohl(len);
+    if (len == 0) { *buf = strdup(""); return 0; }
+
+    *buf = malloc(len + 1);
+    if (!*buf) return -1;
+
+    r = readn(fd, *buf, len);
+    if (r <= 0) {  // short read / error
+        free(*buf);
+        *buf = NULL;
+        return -1;
+    }
+
+    (*buf)[len] = 0;
+    // Strip newline
+    if (len > 0 && (*buf)[len-1] == '\n') (*buf)[len-1] = 0;
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // EXECUTION LOGIC
 // ---------------------------------------------------------------------------
@@ -207,11 +241,21 @@ void *client_thread_func(void *arg) {
     // Client Loop
     while (1) {
         // 1. Receive Command
-        char *cmd = NULL; uint32_t len = 0;
-        int rf = recv_frame_str(cfd, &cmd); // Adapted from net helper, assumes util
+        char *cmd = NULL; 
+        int rf = recv_frame_str(cfd, &cmd);
+
+        if (rf == -1) {
+            // Real error
+            log_line_prefixed("ERROR", prefix, "recv_frame_str failed: %s", strerror(errno));
+            free(cmd);      // safe even if cmd == NULL
+            break;          // will close(cfd) and exit thread
+        }
         
-        // Manually implementing recv since Phase 2 helper was slightly different
-        if (cmd == NULL) break; // Disconnect
+        if (cmd == NULL) {
+            // Clean disconnect (EOF)
+            log_line_prefixed("INFO", prefix, "client disconnected");
+            break;
+        }
         
         // Log reception
         fprintf(stderr, "\n");
@@ -312,23 +356,8 @@ void *client_thread_func(void *arg) {
     return NULL;
 }
 
-// Re-implementing a simple frame receiver compatible with your client
-int recv_frame_str(int fd, char **buf) {
-    uint32_t len;
-    ssize_t r = readn(fd, &len, 4);
-    if (r <= 0) return -1;
-    len = ntohl(len);
-    if (len == 0) { *buf = strdup(""); return 0; }
-    *buf = malloc(len + 1);
-    readn(fd, *buf, len);
-    (*buf)[len] = 0;
-    // Strip newline
-    if (len > 0 && (*buf)[len-1] == '\n') (*buf)[len-1] = 0;
-    return 0;
-}
-
 int main(int argc, char **argv) {
-    uint16_t port = 9090;
+    uint16_t port = 5050;
     if (argc > 1) port = atoi(argv[1]);
     
     int lfd = tcp_listen(port);
