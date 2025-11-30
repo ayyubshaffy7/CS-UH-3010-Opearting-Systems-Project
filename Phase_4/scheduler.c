@@ -102,5 +102,5 @@ void append_timeline(int job_id, int duration) {
 }
 
 void print_timeline() {
-    fprintf(stderr, "\n%s\n", timeline_buffer);
+    fprintf(stderr, "%s\n", timeline_buffer);
 }

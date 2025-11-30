@@ -20,8 +20,15 @@ static int g_client_counter = 0;
 
 // Logging helpers
 static void log_line_prefixed(const char *tag, const char *prefix, const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[%s] %s ", tag, prefix);
+    (void)tag;  // tag now unused on purpose
+    va_list ap;
+    va_start(ap, fmt);
+    // Print prefix, then *directly* the formatted payload.
+    // Because all the fmt's start with "<<<", ">>>" or "---",
+    // this gives outputs like:
+    //   prefix = "[1]", fmt = "<<< client connected"  -> "[1]<<< client connected"
+    //   prefix = "(1)", fmt = "--- created (-1)"      -> "(1)--- created (-1)"
+    fprintf(stderr, "%s", prefix);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);
@@ -102,11 +109,13 @@ void execute_shell_job(Job *job) {
     char buf[1024];
     ssize_t r;
     while ((r = read(out_pfd[0], buf, sizeof(buf))) > 0) {
-        // USE SEND_FRAME HERE
+        // send output to client
         send_frame(job->socket_fd, buf, (uint32_t)r);
-        
-        char prefix[64]; snprintf(prefix, 64, "[%d]", job->id);
-        log_line_prefixed("RECEIVED", prefix, "<<< %zd bytes sent", r);
+
+        // log bytes sent
+        char prefix[64];
+        snprintf(prefix, sizeof(prefix), "[%d]", job->id);
+        log_line_prefixed("SENT", prefix, "<<< %zd bytes sent", r);
     }
     
     // CRITICAL: Send empty frame to signal "End of Command"
@@ -173,8 +182,9 @@ void execute_demo_job(Job *job, int quantum) {
     
     // Log the chunk sent
     if (time_consumed > 0) {
-         char prefix[64]; snprintf(prefix, 64, "[%d]", job->id);
-         log_line_prefixed("RECEIVED", prefix, "<<< %d bytes sent", (int)(time_consumed * 10)); // Approximate bytes
+        char prefix[64];
+        snprintf(prefix, sizeof(prefix), "[%d]", job->id);
+        log_line_prefixed("SENT", prefix, "<<< %d bytes sent", (int)(time_consumed * 10)); // Approximate bytes
     }
 
     // 3. Pause or Finish
@@ -262,7 +272,6 @@ void *client_thread_func(void *arg) {
         }
         
         // Log reception
-        fprintf(stderr, "\n");
         log_line_prefixed("RECEIVED", prefix, ">>> %s", cmd);
 
         if (strcmp(cmd, "exit") == 0) {
