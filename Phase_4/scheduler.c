@@ -7,7 +7,8 @@
 pthread_mutex_t sched_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t sched_cond = PTHREAD_COND_INITIALIZER;
 Job *job_queue = NULL;
-
+Job *current_job;
+bool cpu_busy;
 
 typedef struct TimelineEntry {
     int job_id;      // e.g., 1 => P1
@@ -37,6 +38,29 @@ void add_job(Job *j) {
         while (curr->next) curr = curr->next;
         curr->next = j;
     }
+    // --- Preemption logic ---
+    // Only preempt if CPU is currently running a *program*.
+    if (cpu_busy && current_job && !current_job->is_shell_cmd) {
+
+        bool new_has_priority = false;
+
+        // 1) Shell commands always preempt running program
+        if (j->is_shell_cmd) {
+            new_has_priority = true;
+        }
+        // 2) Otherwise, SRJF: shorter remaining time wins
+        else if (!j->is_shell_cmd &&
+                 j->remaining_time < current_job->remaining_time) {
+            new_has_priority = true;
+        }
+
+        if (new_has_priority) {
+            current_job->preempt_requested = 1;
+        }
+    }
+
+    // Let scheduler know something changed (new job and/or preemption)
+    pthread_cond_signal(&sched_cond);
 }
 
 void remove_job(Job *j) {

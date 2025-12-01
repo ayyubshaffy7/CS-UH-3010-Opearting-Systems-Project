@@ -15,9 +15,9 @@
 #include "net.h"
 #include "utils.h"
 #include "scheduler.h"
+#include <stdbool.h>
 
 static int g_client_counter = 0;
-
 // Logging helpers
 static void log_line_prefixed(const char *tag, const char *prefix, const char *fmt, ...) {
     (void)tag;  // tag now unused on purpose
@@ -160,50 +160,57 @@ void execute_demo_job(Job *job, int quantum) {
         log_line_prefixed("INFO", prefix, "--- running (%d)", job->remaining_time);
     }
 
-    // 2. Read Loop
     int time_consumed = 0;
-    FILE *fp = fdopen(job->pipe_fd, "r"); 
-    
+    FILE *fp = fdopen(job->pipe_fd, "r");
     char *line = NULL; size_t len = 0;
+
     while (time_consumed < quantum && job->remaining_time > 0) {
+
+        // *** PREEMPTION CHECK ***
+        if (job->preempt_requested) {
+            // Someone with higher priority arrived; stop after this unit
+            break;
+        }
+
         ssize_t read = getline(&line, &len, fp);
         if (read == -1) {
             job->remaining_time = 0; // EOF
             break;
         }
 
-        // USE SEND_FRAME HERE
         send_frame(job->socket_fd, line, (uint32_t)read);
-        
         job->remaining_time--;
         time_consumed++;
     }
     free(line);
-    
-    // Log the chunk sent
+
+    // 2. Log chunk sent (same as before)
     if (time_consumed > 0) {
         char prefix[64];
         snprintf(prefix, sizeof(prefix), "[%d]", job->id);
-        log_line_prefixed("SENT", prefix, "<<< %d bytes sent", (int)(time_consumed * 10)); // Approximate bytes
+        log_line_prefixed("SENT", prefix, "<<< %d bytes sent",
+                          (int)(time_consumed * 10)); // your approximation
     }
 
     // 3. Pause or Finish
     if (job->remaining_time > 0) {
+        // Either quantum expired OR we were preempted early
         kill(job->pid, SIGSTOP);
+        job->preempt_requested = 0;   // clear preemption flag
+
         char prefix[64]; snprintf(prefix, 64, "(%d)", job->id);
         log_line_prefixed("INFO", prefix, "--- waiting (%d)", job->remaining_time);
-        
+
         append_timeline(job->id, time_consumed);
     } else {
+        // Job finished
         waitpid(job->pid, NULL, 0);
         job->status = JOB_FINISHED;
 
         send_frame(job->socket_fd, NULL, 0);
 
         char prefix[64]; snprintf(prefix, 64, "(%d)", job->id);
-        log_line_prefixed("INFO", prefix, "--- ended (%d)", 0); // 0 remaining
-        
-        // Use -1 in timeline for completion/end? The screenshot shows just duration.
+        log_line_prefixed("INFO", prefix, "--- ended (%d)", 0);
         append_timeline(job->id, time_consumed);
     }
 }
@@ -216,28 +223,21 @@ void execute_demo_job(Job *job, int quantum) {
 void *scheduler_thread_func(void *arg) {
     while (1) {
         pthread_mutex_lock(&sched_lock);
-        
-        // Wait for a job to be available
-        while (!job_queue) {
+
+        // Wait until:
+        //  - there is at least one job, AND
+        //  - the CPU is not currently being used by some job
+        while ((!job_queue) || cpu_busy) {
             pthread_cond_wait(&sched_cond, &sched_lock);
         }
 
-        // Pick best job
         Job *job = get_next_job();
-        
         if (job) {
-            // Wake up the specific client thread handling this job
+            cpu_busy = true;    // CPU is now occupied by this job
+            current_job = job;  // <--- remember who owns the CPU
             job->my_turn = true;
             pthread_cond_signal(&job->cond);
-            
-            // Wait for it to yield (finish quantum or complete)
-            // We reuse sched_cond for "job yielded" signal
-            pthread_cond_wait(&sched_cond, &sched_lock);
-        } else {
-             // No runnable jobs (e.g. everything finished), wait
-             pthread_cond_wait(&sched_cond, &sched_lock);
         }
-        
         pthread_mutex_unlock(&sched_lock);
     }
     return NULL;
@@ -282,6 +282,7 @@ void *client_thread_func(void *arg) {
         // 2. Create Job
         Job j;
         memset(&j, 0, sizeof(j));
+        j.preempt_requested = 0;
         j.id = client_id;
         j.socket_fd = cfd;
         j.command = cmd;
@@ -343,15 +344,17 @@ void *client_thread_func(void *arg) {
                 int quantum = (j.rounds_run == 0) ? 3 : 7;
                 j.rounds_run++;
                 
-                // Drop lock to allow IO/sleep in demo
-                // Note: In strict single CPU sim, we should hold it, 
-                // but execute_demo sleeps, so we hold it to block others.
+                // Drop the global scheduler lock while running this quantum,
+                // so other clients can enqueue jobs and the scheduler can see them.
+                pthread_mutex_unlock(&sched_lock);
                 execute_demo_job(&j, quantum);
+                pthread_mutex_lock(&sched_lock);
             }
             
-            // Yield back to scheduler
-            j.my_turn = false;
-            pthread_cond_signal(&sched_cond);
+            cpu_busy = false;  // CPU is now free for someone else
+            current_job = NULL;
+            j.my_turn = false; // Yield back to scheduler
+            pthread_cond_signal(&sched_cond);  // wake scheduler to pick next job
         }
         
         remove_job(&j);
