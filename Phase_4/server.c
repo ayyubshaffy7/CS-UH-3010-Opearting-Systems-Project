@@ -1,4 +1,5 @@
 // server.c
+#define DEFAULT_BURST 10
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -178,7 +179,18 @@ void execute_demo_job(Job *job, int quantum) {
             break;
         }
 
-        send_frame(job->socket_fd, line, (uint32_t)read);
+        int rc = send_frame(job->socket_fd, line, (uint32_t)read);
+        if (rc < 0) {
+            // client disconnected -> kill child, mark job finished, stop running this job
+            kill(job->pid, SIGKILL);
+            waitpid(job->pid, NULL, 0);
+            job->status = JOB_FINISHED;
+            job->remaining_time = 0;
+
+            close(job->socket_fd);
+            return; // exit execute_demo_job early
+        }
+
         job->remaining_time--;
         time_consumed++;
     }
@@ -207,7 +219,8 @@ void execute_demo_job(Job *job, int quantum) {
         waitpid(job->pid, NULL, 0);
         job->status = JOB_FINISHED;
 
-        send_frame(job->socket_fd, NULL, 0);
+        // If client already died, this will just fail and we ignore it
+        (void)send_frame(job->socket_fd, NULL, 0);
 
         char prefix[64]; snprintf(prefix, 64, "(%d)", job->id);
         log_line_prefixed("INFO", prefix, "--- ended (%d)", 0);
@@ -294,18 +307,29 @@ void *client_thread_func(void *arg) {
 
         // Parse command type
         if (strncmp(cmd, "./demo", 6) == 0 || strncmp(cmd, "demo", 4) == 0) {
+            // Known demo program: use N if provided, otherwise default
             j.is_shell_cmd = false;
-            // Parse N
+
             char *p = strchr(cmd, ' ');
-            if (p) j.total_time = atoi(p+1);
-            else j.total_time = 10; // default
-            j.remaining_time = j.total_time;
+            if (p) j.total_time = atoi(p + 1);
+            else   j.total_time = DEFAULT_BURST;
+
+            j.remaining_time   = j.total_time;
             j.burst_prediction = j.total_time;
+
+        } else if (strncmp(cmd, "./", 2) == 0) {
+            // Any other ./program (e.g., ./hello) => unknown burst -> default
+            j.is_shell_cmd     = false;
+            j.total_time       = DEFAULT_BURST;
+            j.remaining_time   = j.total_time;
+            j.burst_prediction = j.total_time;
+
         } else {
-            j.is_shell_cmd = true;
-            j.total_time = -1;
-            j.remaining_time = -1;
-            j.burst_prediction = -1; // Highest priority
+            // Plain shell / pipeline commands (pwd, ls, cat foo | grep bar, ... )
+            j.is_shell_cmd     = true;
+            j.total_time       = -1;
+            j.remaining_time   = -1;
+            j.burst_prediction = -1;  // "infinite priority" for scheduling
         }
 
         // 3. Submit to Scheduler
@@ -374,6 +398,11 @@ void *client_thread_func(void *arg) {
 }
 
 int main(int argc, char **argv) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;  // ignore SIGPIPE globally (this is useful so that the server doesn't crash when client does CTRL+C)
+    sigaction(SIGPIPE, &sa, NULL);
+
     uint16_t port = 5050;
     if (argc > 1) port = atoi(argv[1]);
     
