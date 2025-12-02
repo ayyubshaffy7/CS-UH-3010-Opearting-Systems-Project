@@ -1,4 +1,3 @@
-// server.c
 #define DEFAULT_BURST 10
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -21,7 +20,7 @@
 static int g_client_counter = 0;
 // Logging helpers
 static void log_line_prefixed(const char *tag, const char *prefix, const char *fmt, ...) {
-    (void)tag;  // tag now unused on purpose
+    (void)tag;  // tag now unused on purpose, since phase 4 requires different output format
     va_list ap;
     va_start(ap, fmt);
     // Print prefix, then *directly* the formatted payload.
@@ -119,7 +118,7 @@ void execute_shell_job(Job *job) {
         log_line_prefixed("SENT", prefix, "<<< %zd bytes sent", r);
     }
     
-    // CRITICAL: Send empty frame to signal "End of Command"
+    // Important: Send empty frame to signal "End of Command"
     send_frame(job->socket_fd, NULL, 0);
 
     close(out_pfd[0]);
@@ -129,7 +128,7 @@ void execute_shell_job(Job *job) {
 
 // Runs a demo job (preemptive, creates child, manages SIGSTOP/SIGCONT)
 void execute_demo_job(Job *job, int quantum) {
-    // 1. Start or Resume
+    // Start or Resume
     if (!job->started) {
         int pfd[2];
         if (pipe(pfd) < 0) return;
@@ -196,19 +195,18 @@ void execute_demo_job(Job *job, int quantum) {
     }
     free(line);
 
-    // 2. Log chunk sent (same as before)
+    // Log chunk sent
     if (time_consumed > 0) {
         char prefix[64];
         snprintf(prefix, sizeof(prefix), "[%d]", job->id);
-        log_line_prefixed("SENT", prefix, "<<< %d bytes sent",
-                          (int)(time_consumed * 10)); // your approximation
+        log_line_prefixed("SENT", prefix, "<<< %d bytes sent", (int)(time_consumed * 10));
     }
 
-    // 3. Pause or Finish
+    // Pause or Finish
     if (job->remaining_time > 0) {
         // Either quantum expired OR we were preempted early
         kill(job->pid, SIGSTOP);
-        job->preempt_requested = 0;   // clear preemption flag
+        job->preempt_requested = 0;  // clear preemption flag
 
         char prefix[64]; snprintf(prefix, 64, "(%d)", job->id);
         log_line_prefixed("INFO", prefix, "--- waiting (%d)", job->remaining_time);
@@ -232,7 +230,7 @@ void execute_demo_job(Job *job, int quantum) {
 // THREADS
 // ---------------------------------------------------------------------------
 
-// The "Traffic Cop" Thread
+// Scheduler Thread
 void *scheduler_thread_func(void *arg) {
     while (1) {
         pthread_mutex_lock(&sched_lock);
@@ -267,15 +265,15 @@ void *client_thread_func(void *arg) {
 
     // Client Loop
     while (1) {
-        // 1. Receive Command
+        // Receive Command
         char *cmd = NULL; 
         int rf = recv_frame_str(cfd, &cmd);
 
         if (rf == -1) {
             // Real error
             log_line_prefixed("ERROR", prefix, "recv_frame_str failed: %s", strerror(errno));
-            free(cmd);      // safe even if cmd == NULL
-            break;          // will close(cfd) and exit thread
+            free(cmd);  // safe even if cmd == NULL
+            break;      // will close(cfd) and exit thread
         }
         
         if (cmd == NULL) {
@@ -292,7 +290,7 @@ void *client_thread_func(void *arg) {
             break;
         }
 
-        // 2. Create Job
+        // Create Job
         Job j;
         memset(&j, 0, sizeof(j));
         j.preempt_requested = 0;
@@ -332,7 +330,7 @@ void *client_thread_func(void *arg) {
             j.burst_prediction = -1;  // "infinite priority" for scheduling
         }
 
-        // 3. Submit to Scheduler
+        // Submit to Scheduler
         pthread_mutex_lock(&sched_lock);
         add_job(&j);
         
@@ -344,19 +342,17 @@ void *client_thread_func(void *arg) {
 
         pthread_cond_signal(&sched_cond); // Notify scheduler
         
-        // 4. Wait for Execution
+        // Wait for Execution
         while (j.status != JOB_FINISHED) {
             // Wait for turn
             while (!j.my_turn) {
                 pthread_cond_wait(&j.cond, &sched_lock);
             }
-            
-            // I have the lock and it's my turn
-            
+            // "I have the lock and it's my turn"
             if (j.is_shell_cmd) {
                 log_line_prefixed("INFO", prefix, "--- started (-1)");
                 // Execute fully
-                pthread_mutex_unlock(&sched_lock); // Release lock during exec (optional but better for IO)
+                pthread_mutex_unlock(&sched_lock); // Release lock during exec
                 execute_shell_job(&j);
                 pthread_mutex_lock(&sched_lock);   // Reacquire to update state
                 

@@ -1,4 +1,3 @@
-// scheduler.c
 #include "scheduler.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,8 +10,8 @@ Job *current_job;
 bool cpu_busy;
 
 typedef struct TimelineEntry {
-    int job_id;      // e.g., 1 => P1
-    int duration;    // how many "time units" this job ran in that slice
+    int job_id;    // e.g., 1 => P1
+    int duration;  // how many "time units" this job ran in that slice
     struct TimelineEntry *next;
 } TimelineEntry;
 
@@ -44,11 +43,11 @@ void add_job(Job *j) {
 
         bool new_has_priority = false;
 
-        // 1) Shell commands always preempt running program
+        // Shell commands always preempt running program
         if (j->is_shell_cmd) {
             new_has_priority = true;
         }
-        // 2) Otherwise, SRJF: shorter remaining time wins
+        // Otherwise, SRJF: shorter remaining time wins
         else if (!j->is_shell_cmd &&
                  j->remaining_time < current_job->remaining_time) {
             new_has_priority = true;
@@ -86,7 +85,7 @@ Job* get_next_job() {
     Job *curr = job_queue;
     int count = 0;
 
-    // 1. Check for Shell Commands (-1) - HIGHEST PRIORITY
+    // Check for Shell Commands (-1) - HIGHEST PRIORITY
     // They are non-preemptive, run immediately.
     while (curr) {
         if (curr->status != JOB_FINISHED && curr->is_shell_cmd) {
@@ -96,7 +95,7 @@ Job* get_next_job() {
         curr = curr->next;
     }
 
-    // 2. Filter for SRJF (Programs)
+    // Filter for SRJF (Programs)
     curr = job_queue;
     int min_remaining = 999999;
 
